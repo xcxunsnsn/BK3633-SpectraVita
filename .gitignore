@@ -1,0 +1,25 @@
+# Keil per-user state and build products
+*.uvgui.*
+*.uvguix.*
+*.uvopt
+*.uvoptx
+*.uvproj.log
+*.log
+build_log.txt
+
+**/obj/
+**/Objects/
+**/Listings/
+
+# Generated application images. Boot/stack inputs and conversion tools remain tracked.
+**/output/app/
+
+# Stray copied firmware/fault images under the source application folder
+projects/app_gatt/app/*.bin
+
+# Common local/editor artifacts
+*.bak
+*.tmp
+*.user
+.DS_Store
+Thumbs.db

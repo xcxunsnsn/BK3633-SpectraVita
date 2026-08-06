@@ -1,0 +1,69 @@
+
+SECTIONS 0x1D300 ALIGN 32
+{
+    
+    ROM_SYS  0x1D300
+    {
+        *boot_vectors.o(SYS_BOOT,+FIRST)    
+                
+        *boot_handlers.o(SYS_BOOT)
+    }
+
+    FAST_CALL_SEG 0x0001D600 FIXED ALIGNALL 32 { ;Do not change the section order, for image;    
+       *(sys_fiq_entry)   
+       *(sys_irq_entry)   
+       *(sys_softirq_entry)
+    }
+    
+    ROM  +0
+    {
+        *.o(+RO)
+    } 
+
+    RAM_DATA  0x00400B00 NOCOMPRESS
+    {
+        *(+RW)
+    }
+    
+    RAM_BSS  +0 
+    {
+        *(+ZI)
+    } 
+    
+    ScatterAssert((LoadLength(ROM) + LoadLength(RAM_DATA)) < 0x53000 )
+    
+    
+     
+    RAM_STACK_UNUSED 0x0040FFFC - 0x3F0 - 0x3F0 - 0xFF0 - 0x60  EMPTY 0x60 ;
+    {
+    } 
+
+    RAM_STACK_SVC 0x0040FFFC - 0x3F0 - 0x3F0 - 0xFF0  EMPTY 0xFF0 ;
+    {
+    } 
+ 
+    RAM_STACK_IRQ 0x0040FFFC - 0x3F0 - 0x3F0  EMPTY 0x3F0 ;
+    {
+    } 
+    
+    RAM_STACK_FIQ 0x0040FFFC - 0x3F0 EMPTY 0x3F0
+    {
+    
+    }
+
+
+    ScatterAssert((ImageLength(RAM_DATA) + ImageLength(RAM_BSS) + ImageLength(RAM_STACK_UNUSED) + 
+        ImageLength(RAM_STACK_SVC) + ImageLength(RAM_STACK_IRQ) + ImageLength(RAM_STACK_FIQ)) < (62*1024) )
+    
+    
+    RAM_BSS_1  0x00812800
+    {
+       *(ke_heap)
+    }
+
+    ScatterAssert(ImageLength(RAM_BSS_1) < 0x1800)
+    
+    
+}
+
+

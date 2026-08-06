@@ -1,0 +1,10 @@
+#ifndef __REG_EM_BT_TXLMBUF_H_
+#define __REG_EM_BT_TXLMBUF_H_
+
+#define REG_EM_BT_TXLMBUF_SIZE 28
+
+#define REG_EM_BT_TXLMBUF_BASE_ADDR 0x00810000
+
+
+#endif // __REG_EM_BT_TXLMBUF_H_
+
