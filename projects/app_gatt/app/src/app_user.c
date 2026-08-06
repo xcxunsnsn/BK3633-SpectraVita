@@ -64,13 +64,13 @@ static uint8_t scheduled_pending_mask;
 static uint8_t upload_paused;
 static protocol_schedule_t protocol_schedule;
 
-static uint8_t mss_atime = 29;
-static uint16_t mss_astep = 599;
-static uint8_t mss_gain = 10;
-static uint16_t fifo_time = 720;
-static uint8_t fifo_gain = 5;
-static uint8_t uv_gain = 9;
-static uint8_t dist_gain;
+static uint8_t mss_atime = SENSOR_DEFAULT_MSS_ATIME;
+static uint16_t mss_astep = SENSOR_DEFAULT_MSS_ASTEP;
+static uint8_t mss_gain = SENSOR_DEFAULT_MSS_GAIN;
+static uint16_t fifo_time = SENSOR_DEFAULT_FIFO_TIME;
+static uint8_t fifo_gain = SENSOR_DEFAULT_FIFO_GAIN;
+static uint8_t uv_gain = SENSOR_DEFAULT_UV_GAIN;
+static uint8_t dist_gain = SENSOR_DEFAULT_DIST_GAIN;
 
 static protocol_tx_item_t tx_queue[PROTOCOL_TX_QUEUE_DEPTH];
 static uint8_t tx_head;

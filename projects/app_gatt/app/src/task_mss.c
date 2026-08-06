@@ -18,10 +18,7 @@
 #define NVDS_TAG_FACTOR	0xB0
 
 #define DEFAULT_MSS_FACTOR	100
-#define DEFAULT_MSS_ATIME	64
-#define DEFAULT_MSS_AGAIN	4
 #define MSS_DATA_NUM_MAX	20
-#define DEFAULT_MSS_FACTOR	100
 
 enum mss_status_e{
 	MSS_INIT = 0,       //power on delay 200us
@@ -71,13 +68,13 @@ typedef struct {
 
 static UserDataMssStruct userDataMSS; 	
 
-static uint8_t temp_atime = 29;
-static uint16_t temp_astep = 599;
-static uint8_t temp_again = 10;
+static uint8_t temp_atime = SENSOR_DEFAULT_MSS_ATIME;
+static uint16_t temp_astep = SENSOR_DEFAULT_MSS_ASTEP;
+static uint8_t temp_again = SENSOR_DEFAULT_MSS_GAIN;
 
-static uint8_t mss_atime = 29;
-static uint16_t mss_astep = 599;
-static uint8_t mss_again = 10;
+static uint8_t mss_atime = SENSOR_DEFAULT_MSS_ATIME;
+static uint16_t mss_astep = SENSOR_DEFAULT_MSS_ASTEP;
+static uint8_t mss_again = SENSOR_DEFAULT_MSS_GAIN;
 static uint8_t mss_status = MSS_INIT;
 
 static uint8_t remain_report = 0;

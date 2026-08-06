@@ -13,8 +13,8 @@ enum {
 };
 
 static uint8_t fifo_status;
-static uint16_t fifo_time = 720;
-static uint8_t fifo_gain = 5;
+static uint16_t fifo_time = SENSOR_DEFAULT_FIFO_TIME;
+static uint8_t fifo_gain = SENSOR_DEFAULT_FIFO_GAIN;
 static uint16_t fifo_data[128];
 
 void app_read_fifo_task(void)

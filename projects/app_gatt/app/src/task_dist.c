@@ -21,7 +21,7 @@ enum {
 };
 
 static UserDataDistStruct userDataDIST; 
-static uint8_t temp_again = 0;
+static uint8_t temp_again = SENSOR_DEFAULT_DIST_GAIN;
 static uint8_t dist_status = DIST_INIT;
 
 void app_read_proximity_task(void)

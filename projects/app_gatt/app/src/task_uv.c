@@ -17,7 +17,7 @@ UserDataUvStruct userDataUV;
 
 static uint8_t uv_status;
 static uint8_t uv_read_retry;
-static uint8_t uv_gain = 9;
+static uint8_t uv_gain = SENSOR_DEFAULT_UV_GAIN;
 
 void app_read_uv_task(void)
 {
