@@ -38,19 +38,20 @@
  ****************************************************************************************
  */
 enum {
-	TASK_ID_MSS = 0,
-	TASK_ID_FIFO,
-	TASK_ID_UV,
-	TASK_ID_DIST,
-	TASK_ID_ACC,
+	TASK_ID_MSS = 0,   /* AS7341 普通多光谱任务 */
+	TASK_ID_FIFO,      /* AS7341 闪烁 FIFO 任务 */
+	TASK_ID_UV,        /* AS7331 紫外任务 */
+	TASK_ID_DIST,      /* WH4530A 接近任务 */
+	TASK_ID_ACC,       /* ADXL345 加速度任务 */
 };
 
+/* 协议内部传感器编号；顺序必须与 0x4E 的五个 X 和 0x50 TYPE 保持一致。 */
 enum {
-	PROTOCOL_SENSOR_MSS = 0,
-	PROTOCOL_SENSOR_FIFO,
-	PROTOCOL_SENSOR_UV,
-	PROTOCOL_SENSOR_DIST,
-	PROTOCOL_SENSOR_ACC,
+	PROTOCOL_SENSOR_MSS = 0,  /* X[0]，TYPE=1 */
+	PROTOCOL_SENSOR_FIFO,     /* X[1]，TYPE=2 */
+	PROTOCOL_SENSOR_UV,       /* X[2]，TYPE=3 */
+	PROTOCOL_SENSOR_DIST,     /* X[3]，TYPE=4 */
+	PROTOCOL_SENSOR_ACC,      /* X[4]，TYPE=5 */
 	PROTOCOL_SENSOR_COUNT,
 };
 

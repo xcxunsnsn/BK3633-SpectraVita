@@ -58,6 +58,18 @@
 /* 1: only read AS7331/AS7341/ADXL345 IDs, then stop before BLE startup. */
 #define SENSOR_ID_ONLY_TEST           0
 
+/*
+ * Default sensor settings used after boot and before the APP overrides them
+ * through protocol V4 commands 0x42/0x44/0x46/0x48.
+ */
+#define SENSOR_DEFAULT_MSS_ATIME      29
+#define SENSOR_DEFAULT_MSS_ASTEP      599
+#define SENSOR_DEFAULT_MSS_GAIN       10
+#define SENSOR_DEFAULT_FIFO_TIME      720
+#define SENSOR_DEFAULT_FIFO_GAIN      5
+#define SENSOR_DEFAULT_UV_GAIN        9
+#define SENSOR_DEFAULT_DIST_GAIN      0
+
 #define ADC_CALIB                    0//////У׼ADC��Ҫ��оƬһ���ȶ��Ĺ���ѹ��Ȼ����ADC�ο���ѹ
 
 #define ENABLE_PHY_2M_LE_CODE       0 ////2M֧��2M�շ�   
