@@ -1,3 +1,7 @@
+/*
+ * AS7331 紫外传感器状态机：初始化 -> 设置增益并开始测量 -> 读取 UVA/UVB/UVC/温度。
+ * 测量结束后主动停止并进入 Power Down，降低周期采集之间的功耗。
+ */
 #include "task_uv.h"
 #include "driver_AS7331.h"
 #include "rwip_config.h"          // SW configuration
@@ -8,9 +12,9 @@
 #include "app_user.h"
 
 enum {
-	UV_DEV_RESET = 0,
-	UV_PARAM_INIT,
-	UV_READ_DATA,
+	UV_DEV_RESET = 0,    /* 重新初始化 AS7331 */
+	UV_PARAM_INIT,       /* 写入增益并开始一次测量 */
+	UV_READ_DATA,        /* 等待就绪并读取四路结果 */
 };
 
 UserDataUvStruct userDataUV;
@@ -45,6 +49,7 @@ void app_read_uv_task(void)
 			break;
 		
 		case UV_READ_DATA:
+			/* 数据尚未就绪时最多重试 5 次，避免一直占用传感器电源。 */
 			if (!AS7331_GetData(&uv_data[0],&uv_data[1],&uv_data[2],&uv_data[3]))
 			{
 				if (uv_read_retry++ < 5)

@@ -1,3 +1,7 @@
+/*
+ * WH4530A 接近传感器采集任务。
+ * 每次采集连续得到 A/B 两个增益下的原始接近值，最终组成 4 字节记录。
+ */
 #include "task_dist.h"
 #include "driver_WH4530.h"
 #include "rwip_config.h"          // SW configuration
@@ -15,9 +19,9 @@
 #include "app_user.h"
 
 enum {
-	DIST_INIT = 0,
-	DIST_READ_GAIN1,
-	DIST_READ_GAIN2,
+	DIST_INIT = 0,       /* 初始化并启动命令指定增益 A */
+	DIST_READ_GAIN1,     /* 读取 A，然后切换到固定增益 3 */
+	DIST_READ_GAIN2,     /* 读取 B，组合 A/B 后上报 */
 };
 
 static UserDataDistStruct userDataDIST; 
@@ -38,6 +42,7 @@ void app_read_proximity_task(void)
 			break;
 		
 		case DIST_READ_GAIN1:
+			/* A 使用命令增益；B 固定使用增益 3，保留原工程双增益逻辑。 */
 			userDataDIST.data[userDataDIST.data_index].proximity1 = WH4530A_IIC_Read_Distance();
 			WH4530_Enable(false);
 			WH4530_Set_Gain(0x03);

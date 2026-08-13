@@ -1,6 +1,13 @@
-/* Application protocol, sensor scheduling and board power management. */
+/*
+ * 应用层核心文件：协议 V4、五传感器周期调度、RAM 历史缓存和板级低功耗管理。
+ *
+ * 下行：手机 APP -> FEE2 -> app_ble_msg_receive() -> 启动对应传感器任务。
+ * 上行：传感器任务 -> app_protocol_sensor_data() -> FEE4 Notify -> 手机 APP。
+ * 周期采集：每条 0x4E 配置一种传感器，五种传感器的周期互相独立。
+ */
 #include "rwip_config.h"
 #include "user_config.h"
+#include "sensor_period_config.h"
 #include "app_task.h"
 #include "ke_timer.h"
 #include "gpio.h"
@@ -33,12 +40,12 @@ enum led_status {
 };
 
 typedef struct {
-	uint8_t active;
-	uint16_t min_period_s;
-	uint32_t tick;
-	uint8_t multiplier[PROTOCOL_SENSOR_COUNT];
+	uint8_t active;       /* 1=该传感器已经收到 0x4E，参与周期采集 */
+	uint16_t period_s;    /* 该传感器的实际采样周期，单位：秒 */
+	uint16_t elapsed_s;   /* 已累计秒数，到达 period_s 后触发一次采集 */
 } protocol_schedule_t;
 
+/* 每种传感器各有一块独立 RAM 缓存，record_len 决定每组记录的字节数。 */
 typedef struct {
 	uint8_t *data;
 	uint32_t *timestamps;
@@ -62,7 +69,18 @@ static uint8_t flash_count;
 static uint8_t direct_pending_mask;
 static uint8_t scheduled_pending_mask;
 static uint8_t upload_paused;
-static protocol_schedule_t protocol_schedule;
+
+/* 下标顺序固定为：多光谱、FIFO、紫外、接近、加速度。 */
+static protocol_schedule_t protocol_schedule[PROTOCOL_SENSOR_COUNT];
+
+/* 正式采样周期统一来自 config/sensor_period_config.h。 */
+static const uint16_t configured_sensor_period_s[PROTOCOL_SENSOR_COUNT] = {
+	SENSOR_SAMPLE_PERIOD_MSS_S,
+	SENSOR_SAMPLE_PERIOD_FIFO_S,
+	SENSOR_SAMPLE_PERIOD_UV_S,
+	SENSOR_SAMPLE_PERIOD_DIST_S,
+	SENSOR_SAMPLE_PERIOD_ACC_S,
+};
 
 static uint8_t mss_atime = SENSOR_DEFAULT_MSS_ATIME;
 static uint16_t mss_astep = SENSOR_DEFAULT_MSS_ASTEP;
@@ -78,6 +96,10 @@ static uint8_t tx_tail;
 static uint8_t tx_count;
 static uint8_t tx_busy;
 
+/*
+ * 当前仅为片内 RAM 小容量循环缓存，并不能保存完整一天。
+ * 缓存满后 protocol_history_append() 会删除最旧记录，保留最新记录。
+ */
 static uint8_t history_mss[PROTOCOL_HISTORY_MSS_MAX * 22];
 static uint8_t history_fifo[PROTOCOL_HISTORY_FIFO_MAX * 256];
 static uint8_t history_uv[PROTOCOL_HISTORY_UV_MAX * 8];
@@ -100,6 +122,7 @@ void sys_delay(uint32_t times)
 
 static void app_sensor_power_on(void)
 {
+	/* 打开传感器公共电源，等待电源稳定后再初始化 I2C。 */
 	gpio_set(VDD_1P8_PIN, 1);
 	gpio_set(VDD_SENSOR_PIN, 1);
 	/* Match the proven ID-only sequence: rail settle, I2C reset, settle. */
@@ -116,6 +139,7 @@ void app_uart_callback(uint8_t *buf, uint8_t len)
 
 static void protocol_history_init(void)
 {
+	/* 建立“传感器编号 -> 数据区/时间戳区/单组长度/容量”的映射。 */
 	memset(protocol_history, 0, sizeof(protocol_history));
 	protocol_history[PROTOCOL_SENSOR_MSS].data = history_mss;
 	protocol_history[PROTOCOL_SENSOR_MSS].timestamps = history_mss_time;
@@ -139,11 +163,11 @@ static void protocol_history_init(void)
 	protocol_history[PROTOCOL_SENSOR_ACC].capacity = PROTOCOL_HISTORY_ACC_MAX;
 }
 
-static void protocol_history_clear_all(void)
+static void protocol_history_clear(uint8_t sensor_id)
 {
-	uint8_t i;
-	for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++) {
-		protocol_history[i].count = 0;
+	/* 重新配置某一种传感器时，只清除该传感器的旧历史。 */
+	if (sensor_id < PROTOCOL_SENSOR_COUNT) {
+		protocol_history[sensor_id].count = 0;
 	}
 }
 
@@ -163,6 +187,7 @@ static void protocol_history_append(uint8_t sensor_id, const uint8_t *data,
 	}
 	utc_update();
 	now = utc_get_clock();
+	/* RAM 已满：整体前移一组，覆盖最旧数据。 */
 	if (history->count >= history->capacity) {
 		if (history->capacity > 1) {
 			memmove(history->data, history->data + history->record_len,
@@ -218,6 +243,7 @@ void app_user_init(void)
 	uint8_t as7341_ok;
 	uint8_t adxl345_ok;
 
+	/* 上电后默认不自动采集，必须由 APP 发送 0x4E 启动各传感器。 */
 	memset(&protocol_schedule, 0, sizeof(protocol_schedule));
 	protocol_history_init();
 	mssFactor_init();
@@ -273,6 +299,7 @@ void app_clear_no_sleep(void)
 
 void app_task_enter_lowpower(uint8_t task_id)
 {
+	/* 某任务完成后清除占用位；所有任务空闲时关闭传感器公共电源。 */
 	task_lp_sign &= ~(0x01 << task_id);
 	if ((task_lp_sign & 0x03) == 0) {
 		AS7341_disableALL();
@@ -288,6 +315,7 @@ void app_task_enter_lowpower(uint8_t task_id)
 
 void app_task_quit_lowpower(uint8_t task_id)
 {
+	/* 采集开始前打开公共电源，并记录当前正在工作的任务。 */
 	if (task_lp_sign == 0) {
 		app_sensor_power_on();
 	}
@@ -310,6 +338,10 @@ bool app_task_get_mutex(uint8_t task_id)
 
 static void protocol_trigger_sensor(uint8_t sensor_id, uint8_t scheduled)
 {
+	/*
+	 * scheduled=1：周期采集，结果写入对应 RAM 历史缓存。
+	 * scheduled=0：APP 单次查询，结果立即组成 0x43/45/47/49/4B 返回。
+	 */
 	uint8_t mask = 0x01 << sensor_id;
 	if (scheduled) {
 		scheduled_pending_mask |= mask;
@@ -341,21 +373,28 @@ static void protocol_trigger_sensor(uint8_t sensor_id, uint8_t scheduled)
 void app_period_task(void)
 {
 	uint8_t i;
+	uint8_t any_active = 0;
+
 	utc_update();
-	if (!protocol_schedule.active) {
-		return;
-	}
-	protocol_schedule.tick++;
-	if (!upload_paused) {
-		for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++) {
-			if (protocol_schedule.multiplier[i] != 0 &&
-				(protocol_schedule.tick % protocol_schedule.multiplier[i]) == 0) {
+	/* 公共定时器每秒进入一次，但五种传感器分别累计自己的 elapsed_s。 */
+	for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++) {
+		if (!protocol_schedule[i].active) {
+			continue;
+		}
+		any_active = 1;
+		protocol_schedule[i].elapsed_s++;
+		if (protocol_schedule[i].elapsed_s >= protocol_schedule[i].period_s) {
+			protocol_schedule[i].elapsed_s = 0;
+			/* 历史上传期间跳过到期采集，避免采集和大数据发送互相影响。 */
+			if (!upload_paused) {
 				protocol_trigger_sensor(i, 1);
 			}
 		}
 	}
-	ke_timer_set(APP_PERIOD_TIMER, TASK_APP,
-				(uint32_t)protocol_schedule.min_period_s * 100);
+	if (any_active) {
+		/* One-second scheduler tick; each sensor keeps an independent period. */
+		ke_timer_set(APP_PERIOD_TIMER, TASK_APP, 100);
+	}
 }
 
 static void protocol_tx_reset(void)
@@ -368,6 +407,7 @@ static void protocol_tx_reset(void)
 
 static bool protocol_tx_enqueue(const uint8_t *data, uint16_t len)
 {
+	/* BLE 发送采用队列串行化，上一条 Notify 完成后才发送下一条。 */
 	if (len > APP_MSG_MAX_LEN || tx_count >= PROTOCOL_TX_QUEUE_DEPTH) {
 		uart_printf("BLE TX queue full, len=%d\r\n", len);
 		return false;
@@ -382,6 +422,7 @@ static bool protocol_tx_enqueue(const uint8_t *data, uint16_t len)
 
 static bool protocol_send_frame(uint8_t command, const uint8_t *data, uint16_t len)
 {
+	/* 统一封装应用帧：AA | CMD | DATA | XOR | BB。 */
 	uint8_t frame[APP_MSG_MAX_LEN];
 	uint16_t frame_len = len + 4;
 
@@ -496,10 +537,12 @@ void app_protocol_sensor_data(uint8_t sensor_id, const uint8_t *data, uint16_t l
 		return;
 	}
 	mask = 0x01 << sensor_id;
+	/* 周期采集结果只保存到 RAM，不立即通过 BLE 主动上传。 */
 	if (scheduled_pending_mask & mask) {
 		protocol_history_append(sensor_id, data, len);
 		scheduled_pending_mask &= ~mask;
 	}
+	/* 单次读取命令的结果立即通过对应响应命令返回。 */
 	if (direct_pending_mask & mask) {
 		protocol_send_frame(response_command[sensor_id], data, len);
 		direct_pending_mask &= ~mask;
@@ -509,22 +552,62 @@ void app_protocol_sensor_data(uint8_t sensor_id, const uint8_t *data, uint16_t l
 static void protocol_configure_schedule(const uint8_t *buf)
 {
 	uint8_t result = 0;
+	uint8_t i;
+	uint8_t schedule_was_running = 0;
+	uint8_t selected_count = 0;
+	uint8_t selected_sensor = 0;
 	uint32_t start_time;
-	uint16_t min_period;
+	uint16_t period;
 
+	/*
+	 * 0x4E DATA：Unix 时间(4) + 周期秒数(2) + 五个传感器选择位(5)。
+	 * 五个选择位必须且只能有一个为 1；本函数只更新被选中的那套计划。
+	 */
 	memcpy(&start_time, &buf[2], 4);
-	min_period = (uint16_t)buf[6] | ((uint16_t)buf[7] << 8);
-	if (min_period == 0) {
+	period = (uint16_t)buf[6] | ((uint16_t)buf[7] << 8);
+	if (period == 0) {
 		result = 1;
-	} else {
-		ke_timer_clear(APP_PERIOD_TIMER, TASK_APP);
+	}
+	for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++) {
+		if (buf[8 + i] > 1) {
+			result = 1;
+		}
+		if (buf[8 + i] == 1) {
+			selected_sensor = i;
+			selected_count++;
+		}
+	}
+	if (selected_count != 1) {
+		result = 1;
+	}
+	/* 严格模式下，APP 周期必须与 sensor_period_config.h 中的宏一致。 */
+	if (selected_count == 1 && SENSOR_SAMPLE_PERIOD_STRICT &&
+		period != configured_sensor_period_s[selected_sensor]) {
+		result = 1;
+	}
+
+	if (result == 0) {
+		for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++) {
+			if (protocol_schedule[i].active) {
+				schedule_was_running = 1;
+				break;
+			}
+		}
 		utc_set_clock(start_time);
-		protocol_history_clear_all();
-		protocol_schedule.active = 1;
-		protocol_schedule.min_period_s = min_period;
-		protocol_schedule.tick = 0;
-		memcpy(protocol_schedule.multiplier, &buf[8], PROTOCOL_SENSOR_COUNT);
-		ke_timer_set(APP_PERIOD_TIMER, TASK_APP, (uint32_t)min_period * 100);
+		/* 只重置当前传感器，前面已配置的其他四种传感器继续独立运行。 */
+		protocol_history_clear(selected_sensor);
+		protocol_schedule[selected_sensor].active = 1;
+		protocol_schedule[selected_sensor].period_s = period;
+		protocol_schedule[selected_sensor].elapsed_s = 0;
+		if (!schedule_was_running) {
+			ke_timer_set(APP_PERIOD_TIMER, TASK_APP, 100);
+		}
+		uart_printf("V4 schedule sensor=%u, period=%u s\r\n",
+				selected_sensor + 1, period);
+	} else {
+		uart_printf("V4 schedule rejected: period=%u, selected=%u, configured=%u\r\n",
+				period, selected_count,
+				selected_count == 1 ? configured_sensor_period_s[selected_sensor] : 0);
 	}
 	protocol_send_frame(0x4F, &result, 1);
 }
@@ -537,6 +620,7 @@ static void protocol_upload_history(uint8_t type)
 	uint8_t sensor_id;
 	uint32_t timestamp;
 
+	/* 0x50 的 TYPE：1多光谱、2 FIFO、3紫外、4接近、5加速度。 */
 	if (type < 1 || type > PROTOCOL_SENSOR_COUNT) {
 		return;
 	}
@@ -551,6 +635,7 @@ static void protocol_upload_history(uint8_t type)
 				history->count * history->record_len);
 		data_len += history->count * history->record_len;
 	}
+	/* 当前版本一次只组装一个 0x51；完整一天的 Flash 多包上传尚未实现。 */
 	upload_paused = 1;
 	if (protocol_send_frame(0x51, data, data_len)) {
 		history->count = 0;
@@ -565,12 +650,14 @@ void app_ble_msg_receive(uint8_t conidx, uint8_t *buf, uint16_t len)
 	uint16_t expected_len = 0;
 
 	ble_conidx = conidx;
+	/* 第一步先检查帧头、帧尾和异或校验，错误帧不执行任何传感器操作。 */
 	if (len < 4 || buf[0] != PROTOCOL_HEAD || buf[len - 1] != PROTOCOL_TAIL ||
 		data_fcs(&buf[1], len - 3) != buf[len - 2]) {
 		uart_printf("Protocol frame check failed, len=%d\r\n", len);
 		return;
 	}
 	command = buf[1];
+	/* 第二步按命令字检查固定长度，防止越界读取 DATA。 */
 	switch (command) {
 	case 0x40: expected_len = 4; break;
 	case 0x42: expected_len = 8; break;
@@ -591,6 +678,7 @@ void app_ble_msg_receive(uint8_t conidx, uint8_t *buf, uint16_t len)
 		return;
 	}
 
+	/* 第三步执行命令：单次读取、周期配置、历史上传或停止采集。 */
 	switch (command) {
 	case 0x40:
 		app_msg_respond_dev_info();
@@ -624,7 +712,8 @@ void app_ble_msg_receive(uint8_t conidx, uint8_t *buf, uint16_t len)
 		protocol_upload_history(buf[2]);
 		break;
 	case 0x52:
-		protocol_schedule.active = 0;
+		memset(protocol_schedule, 0, sizeof(protocol_schedule));
+		scheduled_pending_mask = 0;
 		ke_timer_clear(APP_PERIOD_TIMER, TASK_APP);
 		protocol_send_frame(0x53, 0, 0);
 		break;

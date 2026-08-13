@@ -15,6 +15,13 @@
  ****************************************************************************************
  */
 
+/*
+ * BLE 自定义服务 FEE0 的应用层入口。
+ * FEE2：手机写入协议命令（Write Without Response）。
+ * FEE4：设备向手机发送协议响应或历史数据（Notify，手机必须先打开通知）。
+ * 本文件只负责 BLE 通道，具体帧校验和传感器操作交给 app_user.c。
+ */
+
 /**
  ****************************************************************************************
  * @addtogroup APP
@@ -102,6 +109,7 @@ void app_fee0_add_fee0s(void)
 
 bool app_fee4_send_ntf(uint8_t conidx,uint16_t len,uint8_t* buf)
 {
+	/* 只有手机已打开 FEE4 Notify 且服务空闲时，才把一帧交给 BLE 协议栈。 */
     if( ke_state_get(prf_get_task_from_id(TASK_ID_FEE0S))==FEE0S_IDLE )
     {
         struct fee0s_env_tag* fee0s_env = PRF_ENV_GET(FEE0S, fee0s);
@@ -241,7 +249,7 @@ static int fee2_writer_cmd_handler(ke_msg_id_t const msgid,
                                      ke_task_id_t const dest_id,
                                      ke_task_id_t const src_id)
 {
-    // Drop the message
+	/* 手机写入 FEE2 后从这里进入；打印原始 HEX，再交给协议 V4 解析器。 */
     uart_printf("FEE2 conidx:%d,length:%d,param->value = 0x ",param->conidx,param->length);
     
     for(uint16_t i = 0;i < param->length;i++)
@@ -305,5 +313,4 @@ const struct ke_msg_handler app_fee0_msg_handler_list[] =
 };
 
 const struct app_subtask_handlers app_fee0_handler = APP_HANDLERS(app_fee0);
-
 

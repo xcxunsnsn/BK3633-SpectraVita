@@ -1,3 +1,7 @@
+/*
+ * ADXL345 加速度单次采集任务。
+ * 每次触发时初始化并进入测量模式，读取 X/Y/Z 三轴后立即回到 Standby。
+ */
 #include "task_acc.h"
 #include "driver_ADXL345.h"
 #include "rwip_config.h"          // SW configuration
@@ -15,8 +19,8 @@
 #include "app_user.h"
 
 enum {
-	ACC_PARAM_INIT = 0,
-	ACC_READ_DATA,
+	ACC_PARAM_INIT = 0,  /* 初始化并开启测量 */
+	ACC_READ_DATA,       /* 读取三轴数据并关闭测量 */
 };
 
 static UserDataAccStruct userDataACC; 	
@@ -36,6 +40,7 @@ void app_read_acc_task(void)
 			break;
 		
 		case ACC_READ_DATA:
+			/* 三个 int16_t 共 6 字节，交给协议层保存或立即返回。 */
 			ADXL345_read_data(&userDataACC.data[userDataACC.data_index].acc_x1,&userDataACC.data[userDataACC.data_index].acc_y1,&userDataACC.data[userDataACC.data_index].acc_z1);
 			app_protocol_sensor_data(PROTOCOL_SENSOR_ACC,
 					(uint8_t *)&userDataACC.data[userDataACC.data_index],

@@ -1,3 +1,8 @@
+/*
+ * AS7341 普通多光谱采集任务。
+ * 传感器需要分两组读取 F1～F4 和 F5～F8，最后组合为一组多光谱数据。
+ * 采集完成后统一调用 app_protocol_sensor_data()，由 app_user.c 决定保存或上传。
+ */
 #include "task_mss.h"
 #include "driver_AS7341.h"
 #include "rwip_config.h"          // SW configuration
@@ -21,12 +26,12 @@
 #define MSS_DATA_NUM_MAX	20
 
 enum mss_status_e{
-	MSS_INIT = 0,       //power on delay 200us
-	MSS_READ_ONE = 1,   //200ms
-    MSS_READ_TWO = 2,   //200ms
-	MSS_READ_THREE,   //200ms
-    MSS_READ_FOUR,   //200ms
-    MSS_READ_LAST, //600ms
+	MSS_INIT = 0,       /* 初始化并启动第一次光谱测量 */
+	MSS_READ_ONE = 1,   /* 读取自动增益流程第一组通道 */
+    MSS_READ_TWO = 2,  /* 读取自动增益流程第二组通道 */
+	MSS_READ_THREE,     /* 使用最终参数读取第一组通道 */
+    MSS_READ_FOUR,     /* 使用最终参数读取第二组通道 */
+    MSS_READ_LAST,     /* 组合、校正并上报完整一组数据 */
 };
 
 typedef struct {
@@ -87,6 +92,7 @@ sModeTwoData_t data2;
 
 void app_mss_integration_task(void)
 {
+	/* MSS 与 FIFO 共用 AS7341；FIFO 忙时延后 200 ms 再尝试。 */
 	uint32_t temp;
 	
 	if(app_task_get_mutex(TASK_ID_MSS) == true)

@@ -754,6 +754,11 @@
               <FilePath>.\config\user_config.h</FilePath>
             </File>
             <File>
+              <FileName>sensor_period_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\config\sensor_period_config.h</FilePath>
+            </File>
+            <File>
               <FileName>rwip_config.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\config\rwip_config.h</FilePath>
