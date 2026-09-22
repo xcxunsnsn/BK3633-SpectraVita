@@ -1,5 +1,5 @@
 /*
- * 应用层核心文件：协议 V4、五传感器周期调度、RAM 历史缓存和板级低功耗管理。
+ * 应用层核心文件：协议 V4、五传感器周期调度、外部 Flash 日志和板级低功耗管理。
  *
  * 下行：手机 APP -> FEE2 -> app_ble_msg_receive() -> 启动对应传感器任务。
  * 上行：传感器任务 -> app_protocol_sensor_data() -> FEE4 Notify -> 手机 APP。
@@ -22,17 +22,16 @@
 #include "app_user.h"
 #include "utc_clock.h"
 #include "app_fee0.h"
+#include "sensor_flash_store.h"
+#include "period_due_queue.h"
+#include "ext_flash.h"
+#include "rwip.h"
 #include <string.h>
 
 #define APP_VERSION                 4
 #define PROTOCOL_HEAD               0xAA
 #define PROTOCOL_TAIL               0xBB
 #define PROTOCOL_TX_QUEUE_DEPTH     4
-#define PROTOCOL_HISTORY_MSS_MAX    12
-#define PROTOCOL_HISTORY_FIFO_MAX   1
-#define PROTOCOL_HISTORY_UV_MAX     20
-#define PROTOCOL_HISTORY_DIST_MAX   20
-#define PROTOCOL_HISTORY_ACC_MAX    20
 
 enum led_status {
 	LED_ON = 0,
@@ -45,19 +44,20 @@ typedef struct {
 	uint16_t elapsed_s;   /* 已累计秒数，到达 period_s 后触发一次采集 */
 } protocol_schedule_t;
 
-/* 每种传感器各有一块独立 RAM 缓存，record_len 决定每组记录的字节数。 */
-typedef struct {
-	uint8_t *data;
-	uint32_t *timestamps;
-	uint16_t record_len;
-	uint8_t capacity;
-	uint8_t count;
-} protocol_history_t;
-
 typedef struct {
 	uint16_t len;
 	uint8_t data[APP_MSG_MAX_LEN];
 } protocol_tx_item_t;
+
+/* 0x50/0x51 多包上传状态；每收到一次 BLE 完成响应才继续下一包。 */
+typedef struct {
+	uint8_t active;
+	uint8_t sensor_id;
+	uint8_t packet_pending;
+	uint16_t packet_records;
+	uint32_t next_index;
+	uint32_t total_records;
+} protocol_upload_t;
 
 static uint8_t ble_connect_sign;
 static uint8_t ble_conidx;
@@ -69,6 +69,7 @@ static uint8_t flash_count;
 static uint8_t direct_pending_mask;
 static uint8_t scheduled_pending_mask;
 static uint8_t upload_paused;
+static period_due_queue_t low_due_queue;
 
 /* 下标顺序固定为：多光谱、FIFO、紫外、接近、加速度。 */
 static protocol_schedule_t protocol_schedule[PROTOCOL_SENSOR_COUNT];
@@ -95,22 +96,52 @@ static uint8_t tx_head;
 static uint8_t tx_tail;
 static uint8_t tx_count;
 static uint8_t tx_busy;
+static protocol_upload_t protocol_upload;
+static uint32_t last_ble_loop_hs;
+static uint32_t max_ble_loop_gap_hs;
+static uint32_t window_ble_loop_gap_hs;
+static uint8_t deferred_command;
+static uint8_t deferred_frame[15];
+static uint8_t deferred_upload_type;
 
-/*
- * 当前仅为片内 RAM 小容量循环缓存，并不能保存完整一天。
- * 缓存满后 protocol_history_append() 会删除最旧记录，保留最新记录。
- */
-static uint8_t history_mss[PROTOCOL_HISTORY_MSS_MAX * 22];
-static uint8_t history_fifo[PROTOCOL_HISTORY_FIFO_MAX * 256];
-static uint8_t history_uv[PROTOCOL_HISTORY_UV_MAX * 8];
-static uint8_t history_dist[PROTOCOL_HISTORY_DIST_MAX * 4];
-static uint8_t history_acc[PROTOCOL_HISTORY_ACC_MAX * 6];
-static uint32_t history_mss_time[PROTOCOL_HISTORY_MSS_MAX];
-static uint32_t history_fifo_time[PROTOCOL_HISTORY_FIFO_MAX];
-static uint32_t history_uv_time[PROTOCOL_HISTORY_UV_MAX];
-static uint32_t history_dist_time[PROTOCOL_HISTORY_DIST_MAX];
-static uint32_t history_acc_time[PROTOCOL_HISTORY_ACC_MAX];
-static protocol_history_t protocol_history[PROTOCOL_SENSOR_COUNT];
+static uint32_t app_elapsed_hs(uint32_t now, uint32_t before)
+{
+	return (now - before) & RWIP_MAX_CLOCK_TIME;
+}
+
+void app_ble_scheduler_heartbeat(void)
+{
+	uint32_t now = rwip_time_get().hs & RWIP_MAX_CLOCK_TIME;
+	uint32_t gap;
+	if (!ble_connect_sign) {
+		last_ble_loop_hs = now;
+		return;
+	}
+	gap = app_elapsed_hs(now, last_ble_loop_hs);
+	if (gap > max_ble_loop_gap_hs) {
+		max_ble_loop_gap_hs = gap;
+	}
+	if (gap > window_ble_loop_gap_hs) {
+		window_ble_loop_gap_hs = gap;
+	}
+	last_ble_loop_hs = now;
+}
+
+void app_ble_timing_report(const char *event, uint8_t reason)
+{
+	ext_flash_stats_t stats;
+	if (!ble_connect_sign && reason == 0xFF) {
+		return;
+	}
+	ext_flash_get_stats(&stats);
+	uart_printf("BLE timing %s reason=%02x loop10=%u life=%u ms\r\n",
+		event, reason, (window_ble_loop_gap_hs * 5) / 16,
+		(max_ble_loop_gap_hs * 5) / 16);
+	uart_printf("BLE flash pp=%u/%ums erase=%u/%ums\r\n",
+		stats.page_programs, (stats.max_page_program_hs * 5) / 16,
+		stats.sector_erases, (stats.max_sector_erase_hs * 5) / 16);
+	if (reason == 0xFF) window_ble_loop_gap_hs = 0;
+}
 
 void sys_delay(uint32_t times)
 {
@@ -135,72 +166,6 @@ void app_uart_callback(uint8_t *buf, uint8_t len)
 {
 	(void)buf;
 	(void)len;
-}
-
-static void protocol_history_init(void)
-{
-	/* 建立“传感器编号 -> 数据区/时间戳区/单组长度/容量”的映射。 */
-	memset(protocol_history, 0, sizeof(protocol_history));
-	protocol_history[PROTOCOL_SENSOR_MSS].data = history_mss;
-	protocol_history[PROTOCOL_SENSOR_MSS].timestamps = history_mss_time;
-	protocol_history[PROTOCOL_SENSOR_MSS].record_len = 22;
-	protocol_history[PROTOCOL_SENSOR_MSS].capacity = PROTOCOL_HISTORY_MSS_MAX;
-	protocol_history[PROTOCOL_SENSOR_FIFO].data = history_fifo;
-	protocol_history[PROTOCOL_SENSOR_FIFO].timestamps = history_fifo_time;
-	protocol_history[PROTOCOL_SENSOR_FIFO].record_len = 256;
-	protocol_history[PROTOCOL_SENSOR_FIFO].capacity = PROTOCOL_HISTORY_FIFO_MAX;
-	protocol_history[PROTOCOL_SENSOR_UV].data = history_uv;
-	protocol_history[PROTOCOL_SENSOR_UV].timestamps = history_uv_time;
-	protocol_history[PROTOCOL_SENSOR_UV].record_len = 8;
-	protocol_history[PROTOCOL_SENSOR_UV].capacity = PROTOCOL_HISTORY_UV_MAX;
-	protocol_history[PROTOCOL_SENSOR_DIST].data = history_dist;
-	protocol_history[PROTOCOL_SENSOR_DIST].timestamps = history_dist_time;
-	protocol_history[PROTOCOL_SENSOR_DIST].record_len = 4;
-	protocol_history[PROTOCOL_SENSOR_DIST].capacity = PROTOCOL_HISTORY_DIST_MAX;
-	protocol_history[PROTOCOL_SENSOR_ACC].data = history_acc;
-	protocol_history[PROTOCOL_SENSOR_ACC].timestamps = history_acc_time;
-	protocol_history[PROTOCOL_SENSOR_ACC].record_len = 6;
-	protocol_history[PROTOCOL_SENSOR_ACC].capacity = PROTOCOL_HISTORY_ACC_MAX;
-}
-
-static void protocol_history_clear(uint8_t sensor_id)
-{
-	/* 重新配置某一种传感器时，只清除该传感器的旧历史。 */
-	if (sensor_id < PROTOCOL_SENSOR_COUNT) {
-		protocol_history[sensor_id].count = 0;
-	}
-}
-
-static void protocol_history_append(uint8_t sensor_id, const uint8_t *data,
-									uint16_t len)
-{
-	protocol_history_t *history;
-	uint8_t index;
-	uint32_t now;
-
-	if (sensor_id >= PROTOCOL_SENSOR_COUNT) {
-		return;
-	}
-	history = &protocol_history[sensor_id];
-	if (len != history->record_len) {
-		return;
-	}
-	utc_update();
-	now = utc_get_clock();
-	/* RAM 已满：整体前移一组，覆盖最旧数据。 */
-	if (history->count >= history->capacity) {
-		if (history->capacity > 1) {
-			memmove(history->data, history->data + history->record_len,
-					(history->capacity - 1) * history->record_len);
-			memmove(history->timestamps, history->timestamps + 1,
-					(history->capacity - 1) * sizeof(uint32_t));
-		}
-		history->count = history->capacity - 1;
-	}
-	index = history->count;
-	memcpy(history->data + index * history->record_len, data, len);
-	history->timestamps[index] = now;
-	history->count++;
 }
 
 void app_peripheral_init(void)
@@ -245,9 +210,14 @@ void app_user_init(void)
 
 	/* 上电后默认不自动采集，必须由 APP 发送 0x4E 启动各传感器。 */
 	memset(&protocol_schedule, 0, sizeof(protocol_schedule));
-	protocol_history_init();
+	period_due_queue_init(&low_due_queue);
+	deferred_command = deferred_upload_type = 0;
+	memset(&protocol_upload, 0, sizeof(protocol_upload));
 	mssFactor_init();
 	utc_set_clock(0);
+	if (!sensor_flash_store_init()) {
+		uart_printf("External flash history unavailable\r\n");
+	}
 
 	/* Do one startup health check, then return every sensor to its low-power state. */
 	app_sensor_power_on();
@@ -339,7 +309,7 @@ bool app_task_get_mutex(uint8_t task_id)
 static void protocol_trigger_sensor(uint8_t sensor_id, uint8_t scheduled)
 {
 	/*
-	 * scheduled=1：周期采集，结果写入对应 RAM 历史缓存。
+	 * scheduled=1：周期采集，结果写入对应外部 Flash 日志。
 	 * scheduled=0：APP 单次查询，结果立即组成 0x43/45/47/49/4B 返回。
 	 */
 	uint8_t mask = 0x01 << sensor_id;
@@ -370,26 +340,80 @@ static void protocol_trigger_sensor(uint8_t sensor_id, uint8_t scheduled)
 	}
 }
 
+static void protocol_stop_schedule_full(uint8_t sensor_id)
+{
+	if (sensor_id >= PROTOCOL_SENSOR_COUNT) {
+		return;
+	}
+	/*
+	 * Flash full is a terminal state for the current periodic plan.  Keep all
+	 * existing records intact and do not sample again until a new 0x4E plan is
+	 * explicitly configured after the history has been uploaded/cleared.
+	 */
+	protocol_schedule[sensor_id].active = 0;
+	protocol_schedule[sensor_id].elapsed_s = 0;
+	scheduled_pending_mask &= (uint8_t)~(0x01U << sensor_id);
+	period_due_queue_clear(&low_due_queue, sensor_id);
+	if (sensor_id == PROTOCOL_SENSOR_ACC) {
+		acc_stream_stop();
+	}
+	uart_printf("Flash full: sensor=%u schedule stopped, old data preserved\r\n",
+			sensor_id + 1);
+}
+
 void app_period_task(void)
 {
 	uint8_t i;
+	uint8_t due_sensor;
 	uint8_t any_active = 0;
+	uint16_t late_s;
+	const period_due_stats_t *due_stats;
 
 	utc_update();
+	/* Stop/upload/reconfigure drains acceleration over multiple main-loop slices. */
+	if (deferred_command != 0) {
+		for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++)
+			if (protocol_schedule[i].active) any_active = 1;
+		if (any_active) ke_timer_set(APP_PERIOD_TIMER, TASK_APP, 100);
+		return;
+	}
+	period_due_queue_tick(&low_due_queue);
 	/* 公共定时器每秒进入一次，但五种传感器分别累计自己的 elapsed_s。 */
 	for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++) {
 		if (!protocol_schedule[i].active) {
+			continue;
+		}
+		if (sensor_flash_store_full(i)) {
+			period_due_queue_clear(&low_due_queue, i);
+			protocol_stop_schedule_full(i);
 			continue;
 		}
 		any_active = 1;
 		protocol_schedule[i].elapsed_s++;
 		if (protocol_schedule[i].elapsed_s >= protocol_schedule[i].period_s) {
 			protocol_schedule[i].elapsed_s = 0;
-			/* 历史上传期间跳过到期采集，避免采集和大数据发送互相影响。 */
-			if (!upload_paused) {
-				protocol_trigger_sensor(i, 1);
+			/* 加速度LOW每秒直读保存；HIGH每秒轮询FIFO作为中断保险。 */
+			if (i == PROTOCOL_SENSOR_ACC) {
+				if (!upload_paused) {
+					acc_stream_second_tick();
+				}
+				continue;
 			}
+			/* Low-rate sensors become due together at 60/600 s. Queue them and
+			 * start no more than one per scheduler tick. */
+			if (!upload_paused)
+				period_due_queue_mark(&low_due_queue, i,
+					(scheduled_pending_mask & (0x01U << i)) != 0);
 		}
+	}
+	if (!upload_paused && period_due_queue_take(&low_due_queue,
+			scheduled_pending_mask, acc_stream_can_yield_flash(),
+			&due_sensor, &late_s)) {
+		due_stats = period_due_queue_stats(&low_due_queue, due_sensor);
+		uart_printf("Schedule start sensor=%u late=%us due=%u start=%u missed=%u\r\n",
+			due_sensor + 1, late_s, due_stats->due, due_stats->started,
+			due_stats->missed);
+		protocol_trigger_sensor(due_sensor, 1);
 	}
 	if (any_active) {
 		/* One-second scheduler tick; each sensor keeps an independent period. */
@@ -439,40 +463,180 @@ static bool protocol_send_frame(uint8_t command, const uint8_t *data, uint16_t l
 	return protocol_tx_enqueue(frame, frame_len);
 }
 
+static void protocol_resume_acc_stream(void)
+{
+	bool resumed;
+
+	if (!protocol_schedule[PROTOCOL_SENSOR_ACC].active ||
+		sensor_flash_store_full(PROTOCOL_SENSOR_ACC)) {
+		return;
+	}
+	resumed = acc_stream_is_active() ? acc_stream_resume() : acc_stream_start();
+	if (!resumed) {
+		protocol_schedule[PROTOCOL_SENSOR_ACC].active = 0;
+		uart_printf("ACC Stream resume failed\r\n");
+	}
+}
+
+static void protocol_upload_abort(const char *reason)
+{
+	if (protocol_upload.active) {
+		uart_printf("Flash upload aborted: %s\r\n", reason);
+	}
+	memset(&protocol_upload, 0, sizeof(protocol_upload));
+	upload_paused = 0;
+	protocol_resume_acc_stream();
+}
+
+static bool protocol_upload_queue_next(void)
+{
+	uint8_t data[APP_MSG_MAX_LEN - 4];
+	uint16_t data_len = 4;
+	uint16_t record_len;
+	uint16_t max_records;
+	uint16_t records;
+	uint16_t i;
+	uint32_t timestamp = 0;
+	uint32_t record_timestamp;
+
+	if (!protocol_upload.active || protocol_upload.packet_pending) {
+		return false;
+	}
+	record_len = sensor_flash_store_record_len(protocol_upload.sensor_id);
+	if (record_len == 0) {
+		protocol_upload_abort("record length");
+		return false;
+	}
+	max_records = (uint16_t)((sizeof(data) - 4) / record_len);
+	records = (uint16_t)(protocol_upload.total_records - protocol_upload.next_index);
+	if (records > max_records) {
+		records = max_records;
+	}
+	for (i = 0; i < records; i++) {
+		if (!sensor_flash_store_read(protocol_upload.sensor_id,
+				protocol_upload.next_index + i, &record_timestamp,
+				&data[data_len], record_len)) {
+			protocol_upload_abort("Flash read/CRC");
+			return false;
+		}
+		if (i == 0) {
+			timestamp = record_timestamp;
+		}
+		data_len += record_len;
+	}
+	/* 空日志也返回一个仅含当前时间戳的 0x51，便于 APP 判断上传已完成。 */
+	if (records == 0) {
+		utc_update();
+		timestamp = utc_get_clock();
+	}
+	memcpy(data, &timestamp, 4);
+	protocol_upload.packet_records = records;
+	protocol_upload.packet_pending = 1;
+	if (!protocol_send_frame(0x51, data, data_len)) {
+		protocol_upload_abort("BLE queue");
+		return false;
+	}
+	return true;
+}
+
 void app_ble_connect_handle(uint8_t conidx)
 {
 	ble_conidx = conidx;
 	ble_connect_sign = 1;
+	last_ble_loop_hs = rwip_time_get().hs & RWIP_MAX_CLOCK_TIME;
+	max_ble_loop_gap_hs = window_ble_loop_gap_hs = 0;
+	ext_flash_reset_stats();
 	flash_count = 4;
 	ke_timer_set(APP_LED_FLASH, TASK_APP, 10);
 }
 
-void app_ble_disconnect_handle(void)
+void app_ble_disconnect_handle(uint8_t reason)
 {
+	uint8_t upload_waiting = deferred_command == 0x50;
+	app_ble_timing_report("disconnect", reason);
+	acc_stream_link_report(reason);
 	gpio_set(BLE_LED_PIN, LED_OFF);
 	ble_connect_sign = 0;
 	direct_pending_mask = 0;
-	upload_paused = 0;
 	protocol_tx_reset();
+	deferred_command = deferred_upload_type = 0;
+	if (upload_waiting) acc_stream_cancel_pause();
+	/* 断线时不清 Flash；重新连接后再次发送 0x50 会从第一包重新上传。 */
+	protocol_upload_abort("BLE disconnected");
 }
 
 void app_ble_send_upd_handler(void)
 {
-	if (tx_busy) {
-		tx_busy = 0;
-		tx_head = (tx_head + 1) % PROTOCOL_TX_QUEUE_DEPTH;
-		if (tx_count != 0) {
-			tx_count--;
-		}
-	}
-	if (ble_connect_sign && tx_count != 0 &&
+	/* 本函数只负责启动发送；队头只能在 app_ble_send_complete() 中弹出。 */
+	if (!tx_busy && ble_connect_sign && tx_count != 0 &&
 		app_fee4_send_ntf(ble_conidx, tx_queue[tx_head].len,
 						tx_queue[tx_head].data)) {
 		tx_busy = 1;
 	}
-	if (tx_count == 0) {
-		upload_paused = 0;
+
+}
+
+void app_ble_send_complete(uint8_t status)
+{
+	uint8_t upload_packet;
+	uint8_t completed_sensor;
+	uint8_t clear_ok;
+
+	if (!tx_busy || tx_count == 0) {
+		return;
 	}
+	tx_busy = 0;
+	if (status != 0) {
+		protocol_tx_reset();
+		protocol_upload_abort("BLE notify failed");
+		return;
+	}
+	upload_packet = protocol_upload.active && protocol_upload.packet_pending;
+	tx_head = (tx_head + 1) % PROTOCOL_TX_QUEUE_DEPTH;
+	tx_count--;
+
+	if (upload_packet) {
+		protocol_upload.packet_pending = 0;
+		protocol_upload.next_index += protocol_upload.packet_records;
+		if (protocol_upload.next_index < protocol_upload.total_records) {
+			protocol_upload_queue_next();
+			return;
+		}
+		/* 最后一包已由协议栈确认成功，此时才清除该传感器当天数据。 */
+		completed_sensor = protocol_upload.sensor_id;
+		clear_ok = 0;
+		if (sensor_flash_store_clear(protocol_upload.sensor_id)) {
+			clear_ok = 1;
+			if (protocol_upload.sensor_id == PROTOCOL_SENSOR_ACC) {
+				acc_stream_history_cleared();
+			}
+			uart_printf("Flash upload complete and history cleared, sensor=%u\r\n",
+						protocol_upload.sensor_id + 1);
+			/* 若没有收到 0x52，立即建立下一天日志，原周期计划继续运行。 */
+			if (protocol_schedule[protocol_upload.sensor_id].active) {
+				uint32_t next_start_time;
+				utc_update();
+				next_start_time = utc_get_clock();
+				if (!sensor_flash_store_start(protocol_upload.sensor_id,
+						next_start_time,
+						protocol_schedule[protocol_upload.sensor_id].period_s)) {
+					protocol_schedule[protocol_upload.sensor_id].active = 0;
+					uart_printf("Flash next-day history start failed, sensor=%u\r\n",
+							protocol_upload.sensor_id + 1);
+				}
+			}
+		} else {
+			uart_printf("Flash upload complete but clear failed, sensor=%u\r\n",
+						protocol_upload.sensor_id + 1);
+		}
+		memset(&protocol_upload, 0, sizeof(protocol_upload));
+		upload_paused = 0;
+		/* 上传任何历史时都暂停加速度；结束后恢复。ACC 清除失败则保留停机。 */
+		if (completed_sensor != PROTOCOL_SENSOR_ACC || clear_ok) {
+			protocol_resume_acc_stream();
+		}
+	}
+	app_ble_send_upd_handler();
 }
 
 void app_led_flash_task(void)
@@ -537,16 +701,150 @@ void app_protocol_sensor_data(uint8_t sensor_id, const uint8_t *data, uint16_t l
 		return;
 	}
 	mask = 0x01 << sensor_id;
-	/* 周期采集结果只保存到 RAM，不立即通过 BLE 主动上传。 */
+	/* 周期采集结果写入外部 Flash，不立即通过 BLE 主动上传。 */
 	if (scheduled_pending_mask & mask) {
-		protocol_history_append(sensor_id, data, len);
+		uint32_t now;
+		utc_update();
+		now = utc_get_clock();
+		if (!sensor_flash_store_append(sensor_id, now, data, len)) {
+			uart_printf("Flash append failed, sensor=%u count=%u\r\n",
+						sensor_id + 1, sensor_flash_store_count(sensor_id));
+			if (sensor_flash_store_full(sensor_id)) {
+				protocol_stop_schedule_full(sensor_id);
+			} else {
+				/* 非“已满”的写入失败通常是 SPI/Flash 故障，停止该传感器避免反复写。 */
+				protocol_schedule[sensor_id].active = 0;
+			}
+		} else if (sensor_flash_store_full(sensor_id)) {
+			protocol_stop_schedule_full(sensor_id);
+		}
 		scheduled_pending_mask &= ~mask;
 	}
 	/* 单次读取命令的结果立即通过对应响应命令返回。 */
 	if (direct_pending_mask & mask) {
-		protocol_send_frame(response_command[sensor_id], data, len);
+		/*
+		 * AS7341 单次命令 0x42 已由 APP 指定 AGAIN，0x43 不重复返回增益。
+		 * task_mss.c 内部结构首字段仍是 uint16_t AGAIN，周期历史要保留它，
+		 * 因此这里只在单次应答时跳过前 2 字节，返回 F1～F8/CLEAR/NIR。
+		 */
+		if (sensor_id == PROTOCOL_SENSOR_MSS && len == 22) {
+			protocol_send_frame(response_command[sensor_id], data + 2, len - 2);
+		} else {
+			protocol_send_frame(response_command[sensor_id], data, len);
+		}
 		direct_pending_mask &= ~mask;
 	}
+}
+
+bool app_protocol_acc_stream_sample(uint8_t motion_state,
+									int16_t x, int16_t y, int16_t z)
+{
+	uint8_t result;
+	utc_update();
+	result = app_protocol_acc_commit(utc_get_clock(), motion_state, x, y, z);
+	return result == ACC_COMMIT_OK || result == ACC_COMMIT_LAST;
+}
+
+uint8_t app_protocol_acc_commit(uint32_t timestamp, uint8_t motion_state,
+                               int16_t x, int16_t y, int16_t z)
+{
+	uint8_t record[1][ACC_HISTORY_RECORD_LEN];
+	uint8_t accepted;
+	uint8_t result;
+	uint16_t value;
+
+	/* 每条加速度历史：0=LOW/1=HIGH，随后为 X/Y/Z 的 int16_t 小端值。 */
+	record[0][0] = motion_state;
+	value = (uint16_t)x;
+	record[0][1] = (uint8_t)value;
+	record[0][2] = (uint8_t)(value >> 8);
+	value = (uint16_t)y;
+	record[0][3] = (uint8_t)value;
+	record[0][4] = (uint8_t)(value >> 8);
+	value = (uint16_t)z;
+	record[0][5] = (uint8_t)value;
+	record[0][6] = (uint8_t)(value >> 8);
+	result = app_protocol_acc_commit_batch(&timestamp, record, 1, &accepted);
+	return accepted == 1 ? result :
+		(result == ACC_COMMIT_FULL ? ACC_COMMIT_FULL : ACC_COMMIT_ERROR);
+}
+
+uint8_t app_protocol_acc_commit_batch(
+		const uint32_t timestamps[],
+		uint8_t records[][ACC_HISTORY_RECORD_LEN],
+		uint8_t requested, uint8_t *accepted)
+{
+	uint8_t result;
+
+	if (accepted == 0) {
+		return ACC_COMMIT_ERROR;
+	}
+	*accepted = 0;
+	/* Internal queue commit may drain after acquisition has been frozen. */
+	if (upload_paused) {
+		return ACC_COMMIT_ERROR;
+	}
+	result = sensor_flash_store_append_acc_batch(
+		timestamps, records, requested, accepted);
+	if (result == SENSOR_FLASH_BATCH_ERROR) {
+		uart_printf("ACC Flash append failed, count=%u\r\n",
+				sensor_flash_store_count(PROTOCOL_SENSOR_ACC));
+		protocol_schedule[PROTOCOL_SENSOR_ACC].active = 0;
+		return ACC_COMMIT_ERROR;
+	}
+	if (result == SENSOR_FLASH_BATCH_FULL) {
+		protocol_schedule[PROTOCOL_SENSOR_ACC].active = 0;
+		return ACC_COMMIT_FULL;
+	}
+	if (result == SENSOR_FLASH_BATCH_LAST) {
+		protocol_schedule[PROTOCOL_SENSOR_ACC].active = 0;
+		return ACC_COMMIT_LAST;
+	}
+	return ACC_COMMIT_OK;
+}
+
+uint8_t app_protocol_acc_commit_async_begin(
+		const uint32_t timestamps[],
+		uint8_t records[][ACC_HISTORY_RECORD_LEN], uint8_t requested)
+{
+	uint8_t result;
+	if (upload_paused) return ACC_COMMIT_ERROR;
+	result = sensor_flash_store_acc_async_begin(timestamps, records, requested);
+	if (result == SENSOR_FLASH_BATCH_BUSY) return ACC_COMMIT_BUSY;
+	if (result == SENSOR_FLASH_BATCH_FULL) return ACC_COMMIT_FULL;
+	return ACC_COMMIT_ERROR;
+}
+
+uint8_t app_protocol_acc_commit_async_process(uint8_t *accepted)
+{
+	uint8_t result = sensor_flash_store_acc_async_process(accepted);
+	if (result == SENSOR_FLASH_BATCH_BUSY) return ACC_COMMIT_BUSY;
+	if (result == SENSOR_FLASH_BATCH_OK) return ACC_COMMIT_OK;
+	if (result == SENSOR_FLASH_BATCH_LAST) {
+		protocol_schedule[PROTOCOL_SENSOR_ACC].active = 0;
+		return ACC_COMMIT_LAST;
+	}
+	if (result == SENSOR_FLASH_BATCH_FULL) {
+		protocol_schedule[PROTOCOL_SENSOR_ACC].active = 0;
+		return ACC_COMMIT_FULL;
+	}
+	protocol_schedule[PROTOCOL_SENSOR_ACC].active = 0;
+	return ACC_COMMIT_ERROR;
+}
+
+bool app_protocol_acc_flash_allowed(void)
+{
+	uint8_t other = (uint8_t)(scheduled_pending_mask &
+		~(0x01U << PROTOCOL_SENSOR_ACC));
+	return other == 0 && !protocol_upload.active;
+}
+
+void app_protocol_acc_stream_fault(const char *reason)
+{
+	protocol_schedule[PROTOCOL_SENSOR_ACC].active = 0;
+	protocol_schedule[PROTOCOL_SENSOR_ACC].elapsed_s = 0;
+	scheduled_pending_mask &= (uint8_t)~(0x01U << PROTOCOL_SENSOR_ACC);
+	uart_printf("ACC adaptive sampling stopped: %s\r\n", reason);
 }
 
 static void protocol_configure_schedule(const uint8_t *buf)
@@ -586,6 +884,19 @@ static void protocol_configure_schedule(const uint8_t *buf)
 		result = 1;
 	}
 
+	if (result == 0 && selected_sensor == PROTOCOL_SENSOR_ACC &&
+		(!acc_stream_is_stopped() || !acc_stream_data_complete())) result = 1;
+	if (result == 0) {
+		utc_set_clock(start_time);
+		protocol_schedule[selected_sensor].active = 0;
+		/* 重配时丢弃该传感器尚未完成的旧周期样本，避免写进新一天日志。 */
+		scheduled_pending_mask &= ~(0x01 << selected_sensor);
+		period_due_queue_clear(&low_due_queue, selected_sensor);
+		if (!sensor_flash_store_start(selected_sensor, start_time, period)) {
+			result = 1;
+			uart_printf("V4 schedule rejected: external Flash unavailable\r\n");
+		}
+	}
 	if (result == 0) {
 		for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++) {
 			if (protocol_schedule[i].active) {
@@ -593,17 +904,22 @@ static void protocol_configure_schedule(const uint8_t *buf)
 				break;
 			}
 		}
-		utc_set_clock(start_time);
 		/* 只重置当前传感器，前面已配置的其他四种传感器继续独立运行。 */
-		protocol_history_clear(selected_sensor);
 		protocol_schedule[selected_sensor].active = 1;
 		protocol_schedule[selected_sensor].period_s = period;
 		protocol_schedule[selected_sensor].elapsed_s = 0;
-		if (!schedule_was_running) {
+		if (selected_sensor == PROTOCOL_SENSOR_ACC && !acc_stream_start()) {
+			protocol_schedule[selected_sensor].active = 0;
+			result = 1;
+			uart_printf("V4 ACC Stream start failed\r\n");
+		}
+		if (result == 0 && !schedule_was_running) {
 			ke_timer_set(APP_PERIOD_TIMER, TASK_APP, 100);
 		}
-		uart_printf("V4 schedule sensor=%u, period=%u s\r\n",
-				selected_sensor + 1, period);
+		if (result == 0) {
+			uart_printf("V4 schedule sensor=%u, period=%u s\r\n",
+					selected_sensor + 1, period);
+		}
 	} else {
 		uart_printf("V4 schedule rejected: period=%u, selected=%u, configured=%u\r\n",
 				period, selected_count,
@@ -614,33 +930,62 @@ static void protocol_configure_schedule(const uint8_t *buf)
 
 static void protocol_upload_history(uint8_t type)
 {
-	protocol_history_t *history;
-	uint8_t data[APP_MSG_MAX_LEN - 4];
-	uint16_t data_len;
 	uint8_t sensor_id;
-	uint32_t timestamp;
 
 	/* 0x50 的 TYPE：1多光谱、2 FIFO、3紫外、4接近、5加速度。 */
 	if (type < 1 || type > PROTOCOL_SENSOR_COUNT) {
+		uart_printf("Flash upload TYPE error: %u\r\n", type);
 		return;
 	}
 	sensor_id = type - 1;
-	history = &protocol_history[sensor_id];
-	utc_update();
-	timestamp = history->count ? history->timestamps[0] : utc_get_clock();
-	memcpy(data, &timestamp, 4);
-	data_len = 4;
-	if (history->count != 0) {
-		memcpy(data + data_len, history->data,
-				history->count * history->record_len);
-		data_len += history->count * history->record_len;
+	if (!sensor_flash_store_ready() || protocol_upload.active ||
+		tx_busy || tx_count != 0 || !ble_connect_sign) {
+		uart_printf("Flash upload busy/not ready\r\n");
+		return;
 	}
-	/* 当前版本一次只组装一个 0x51；完整一天的 Flash 多包上传尚未实现。 */
 	upload_paused = 1;
-	if (protocol_send_frame(0x51, data, data_len)) {
-		history->count = 0;
-	} else {
-		upload_paused = 0;
+	memset(&protocol_upload, 0, sizeof(protocol_upload));
+	protocol_upload.active = 1;
+	protocol_upload.sensor_id = sensor_id;
+	protocol_upload.total_records = sensor_flash_store_count(sensor_id);
+	uart_printf("Flash upload start sensor=%u, total=%u\r\n",
+				sensor_id + 1, protocol_upload.total_records);
+	protocol_upload_queue_next();
+}
+
+void app_protocol_background_process(void)
+{
+	uint8_t selected_count;
+	uint8_t i;
+	if (deferred_command == 0) return;
+
+	if (deferred_command == 0x52) {
+		if (!acc_stream_is_stopped()) return;
+		if (acc_stream_data_complete()) protocol_send_frame(0x53, 0, 0);
+		else uart_printf("Stop incomplete: ACC history not fully committed\r\n");
+		deferred_command = 0;
+		return;
+	}
+	if (deferred_command == 0x50) {
+		if (scheduled_pending_mask != 0) return;
+		if (acc_stream_is_active() && !acc_stream_is_paused()) return;
+		if (acc_stream_storage_busy()) return;
+		protocol_upload_history(deferred_upload_type);
+		deferred_command = 0;
+		return;
+	}
+	if (deferred_command == 0x4E) {
+		selected_count = 0;
+		for (i = 0; i < PROTOCOL_SENSOR_COUNT; i++)
+			if (deferred_frame[8 + i] == 1) selected_count++;
+		if (selected_count == 1 && deferred_frame[12] == 1 &&
+			!acc_stream_is_stopped()) {
+			acc_stream_stop();
+			return;
+		}
+		if (acc_stream_storage_busy() || scheduled_pending_mask != 0) return;
+		protocol_configure_schedule(deferred_frame);
+		deferred_command = 0;
 	}
 }
 
@@ -677,6 +1022,11 @@ void app_ble_msg_receive(uint8_t conidx, uint8_t *buf, uint16_t len)
 					command, len, expected_len);
 		return;
 	}
+	/* Flash控制命令按顺序执行，完成前不接受新的传感器命令。 */
+	if (protocol_upload.active || deferred_command != 0) {
+		uart_printf("Protocol busy: Flash history is uploading\r\n");
+		return;
+	}
 
 	/* 第三步执行命令：单次读取、周期配置、历史上传或停止采集。 */
 	switch (command) {
@@ -706,16 +1056,31 @@ void app_ble_msg_receive(uint8_t conidx, uint8_t *buf, uint16_t len)
 		protocol_trigger_sensor(PROTOCOL_SENSOR_ACC, 0);
 		break;
 	case 0x4E:
-		protocol_configure_schedule(buf);
+		memcpy(deferred_frame, buf, sizeof(deferred_frame));
+		deferred_command = 0x4E;
 		break;
 	case 0x50:
-		protocol_upload_history(buf[2]);
+		if (buf[2] < 1 || buf[2] > PROTOCOL_SENSOR_COUNT) {
+			uart_printf("Flash upload TYPE error: %u\r\n", buf[2]);
+			break;
+		}
+		if (!sensor_flash_store_ready() || protocol_upload.active ||
+			tx_busy || tx_count != 0 || !ble_connect_sign) {
+			uart_printf("Flash upload busy/not ready\r\n");
+			break;
+		}
+		period_due_queue_clear_all(&low_due_queue);
+		deferred_upload_type = buf[2];
+		deferred_command = 0x50;
+		acc_stream_pause();
 		break;
 	case 0x52:
 		memset(protocol_schedule, 0, sizeof(protocol_schedule));
 		scheduled_pending_mask = 0;
+		period_due_queue_clear_all(&low_due_queue);
 		ke_timer_clear(APP_PERIOD_TIMER, TASK_APP);
-		protocol_send_frame(0x53, 0, 0);
+		deferred_command = 0x52;
+		acc_stream_stop();
 		break;
 	default:
 		break;

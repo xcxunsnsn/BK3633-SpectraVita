@@ -2,6 +2,7 @@
 #define _driver_AS7341_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include "i2c.h"
 
@@ -153,8 +154,10 @@ void FDConfig(void);
 void AS7341_StartFlicker(void);
 void AS7341_StartMeasure(eChChoose_t mode);
 UBYTE AS7341_ReadFlickerData(void);
-void AS7341_SetFlickerFIFO(UWORD fd_time, UBYTE fd_gain,UBYTE fd_thred);
-void AS7341_ReadFlickerFIFO(UWORD *buf, UBYTE *len);
+bool AS7341_StartFlickerFIFO(UWORD fd_time, UBYTE fd_gain);
+bool AS7341_GetFlickerFIFOStatus(UBYTE *level, UBYTE *status6);
+bool AS7341_ReadFlickerFIFO(UWORD *buf, UBYTE max_samples, UBYTE *len);
+bool AS7341_StopFlickerFIFO(void);
 UWORD AS7341_GetChannelData(UBYTE channel);
 sModeOneData_t AS7341_ReadSpectralDataOne(void);
 sModeTwoData_t AS7341_ReadSpectralDataTwo(void);

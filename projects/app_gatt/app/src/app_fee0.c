@@ -199,7 +199,8 @@ static int fee4_val_upd_rsp_handler(ke_msg_id_t const msgid,
 	//uart_printf("%s,status:%x\r\n", __func__,param->status);
 	
 	ke_state_set(dest_id, FEE0S_IDLE);
-	app_ble_send_upd_handler();
+	/* 只有收到本响应，应用层才能弹出当前包、发送下一包或清除 Flash。 */
+	app_ble_send_complete(param->status);
 	
     return (KE_MSG_CONSUMED);
 }

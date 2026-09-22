@@ -34,6 +34,27 @@ typedef struct {
 
 void app_read_acc_task(void);
 void acc_collect_once_report(uint8_t again);
+/* 周期加速度：LOW实际1Hz直读保存，HIGH实际50Hz FIFO全量保存。 */
+bool acc_stream_start(void);
+bool acc_stream_stop(void);
+bool acc_stream_pause(void);
+void acc_stream_cancel_pause(void);
+void acc_stream_process(void);
+void acc_stream_storage_process(void);
+void acc_stream_storage_tick(void);
+void acc_stream_poll_task(void);
+bool acc_stream_resume(void);
+void acc_stream_second_tick(void);
+bool acc_stream_is_active(void);
+bool acc_stream_is_stopped(void);
+bool acc_stream_is_paused(void);
+bool acc_stream_storage_busy(void);
+bool acc_stream_can_yield_flash(void);
+void acc_stream_link_report(uint8_t reason);
+bool acc_stream_data_complete(void);
+void acc_stream_history_cleared(void);
+uint8_t acc_stream_motion_state(void);
+void acc_gpio_interrupt_callback(void);
 
 #ifdef __cplusplus
 }

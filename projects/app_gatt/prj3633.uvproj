@@ -494,6 +494,21 @@
               <FilePath>.\app\src\app_user.c</FilePath>
             </File>
             <File>
+              <FileName>ext_flash.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\src\ext_flash.c</FilePath>
+            </File>
+            <File>
+              <FileName>sensor_flash_store.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\src\sensor_flash_store.c</FilePath>
+            </File>
+            <File>
+              <FileName>period_due_queue.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\app\src\period_due_queue.c</FilePath>
+            </File>
+            <File>
               <FileName>app_ftmp.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\app\src\app_ftmp.c</FilePath>
@@ -612,6 +627,11 @@
               <FileName>spi.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\Src\driver\spi\spi.c</FilePath>
+            </File>
+            <File>
+              <FileName>spi_read_checked.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\Src\driver\spi\spi_read_checked.c</FilePath>
             </File>
             <File>
               <FileName>icu.c</FileName>

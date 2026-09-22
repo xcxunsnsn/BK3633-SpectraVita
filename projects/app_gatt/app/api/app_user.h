@@ -74,12 +74,40 @@ void app_task_enter_lowpower(uint8_t task_id);
 void app_task_quit_lowpower(uint8_t task_id);
 bool app_task_get_mutex(uint8_t task_id);
 void app_period_task(void);
+void app_ble_scheduler_heartbeat(void);
+void app_ble_timing_report(const char *event, uint8_t reason);
 void app_ble_connect_handle(uint8_t conidx);
-void app_ble_disconnect_handle(void);
+void app_ble_disconnect_handle(uint8_t reason);
 void app_ble_send_upd_handler(void);
+/* FEE4 Notify 的协议栈完成回调；status=0 才代表手机侧发送成功。 */
+void app_ble_send_complete(uint8_t status);
 void app_led_flash_task(void);
 void app_ble_msg_receive(uint8_t conidx, uint8_t *buf, uint16_t len);
 void app_protocol_sensor_data(uint8_t sensor_id, const uint8_t *data, uint16_t len);
+/* Legacy immediate wrapper; FIFO3 uses the batch commit API below. */
+bool app_protocol_acc_stream_sample(uint8_t motion_state,
+									int16_t x, int16_t y, int16_t z);
+#define ACC_COMMIT_ERROR 0U
+#define ACC_COMMIT_OK    1U
+#define ACC_COMMIT_LAST  2U /* Accepted this record and reached capacity. */
+#define ACC_COMMIT_FULL  3U /* Already full: no record accepted. */
+#define ACC_COMMIT_BUSY  4U
+#define ACC_COMMIT_BATCH_MAX 8U
+#define ACC_HISTORY_RECORD_LEN 7U
+uint8_t app_protocol_acc_commit_batch(
+		const uint32_t timestamps[],
+		uint8_t records[][ACC_HISTORY_RECORD_LEN],
+		uint8_t requested, uint8_t *accepted);
+uint8_t app_protocol_acc_commit(uint32_t timestamp, uint8_t state,
+                               int16_t x, int16_t y, int16_t z);
+uint8_t app_protocol_acc_commit_async_begin(
+		const uint32_t timestamps[],
+		uint8_t records[][ACC_HISTORY_RECORD_LEN], uint8_t requested);
+uint8_t app_protocol_acc_commit_async_process(uint8_t *accepted);
+bool app_protocol_acc_flash_allowed(void);
+/* 运行中切换采样模式失败时只停止加速度计划，不影响其他传感器。 */
+void app_protocol_acc_stream_fault(const char *reason);
+void app_protocol_background_process(void);
 
 void app_ble_send_data(uint8_t *buf, uint16_t len);
 uint8_t data_fcs(uint8_t *buf, uint16_t len);

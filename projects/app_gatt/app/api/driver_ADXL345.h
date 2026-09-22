@@ -2,6 +2,7 @@
 #define _driver_ADXL345_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include "i2c.h"
 
@@ -42,6 +43,20 @@
 #define ADXL345_REG_FIFO_CTL (0x38)       ///< FIFO control
 #define ADXL345_REG_FIFO_STATUS (0x39)    ///< FIFO status
 
+/* INT_ENABLE/INT_SOURCE位定义。 */
+#define ADXL345_INT_OVERRUN       0x01
+#define ADXL345_INT_WATERMARK     0x02
+#define ADXL345_INT_INACTIVITY    0x08
+#define ADXL345_INT_ACTIVITY      0x10
+#define ADXL345_ACT_X_SOURCE      0x40
+#define ADXL345_ACT_Y_SOURCE      0x20
+#define ADXL345_ACT_Z_SOURCE      0x10
+
+/* FIFO_CTL模式位。SAMPLES有效范围1～31，0会立即置位Watermark。 */
+#define ADXL345_FIFO_BYPASS       0x00
+#define ADXL345_FIFO_STREAM       0x80
+#define ADXL345_FIFO_ENTRIES_MASK 0x3F
+
 /**
  * @brief Used with register 0x2C (ADXL345_REG_BW_RATE) to set bandwidth
 */
@@ -79,6 +94,30 @@ typedef enum {
 bool ADXL345_Get_ID(void);
 void ADXL345_Init(void);
 void ADXL345_Enable(int flag);
-void ADXL345_read_data(short *x, short *y, short *z);
+bool ADXL345_read_data(short *x, short *y, short *z);
+/* LOW：Sleep/Wakeup 1Hz，Activity映射到INT1，FIFO停止。 */
+bool ADXL345_LowRate_Start(uint8_t activity_threshold,
+							   uint8_t activity_control);
+/* 清除切换瞬态后，单独开放LOW Activity中断。 */
+bool ADXL345_LowRate_ArmActivity(void);
+/* HIGH：50Hz Stream + Watermark，并把Watermark映射到INT1。 */
+bool ADXL345_Stream_Start(uint8_t watermark, uint8_t inactivity_threshold,
+							  uint8_t inactivity_time,
+							  uint8_t inactivity_control);
+/* 冻结采样但保留FIFO内容，供停止/切换前排空。 */
+bool ADXL345_Stream_Freeze(void);
+bool ADXL345_FIFO_Status(uint8_t *entries, uint8_t *source);
+/* Read FIFO_STATUS only; does not clear Activity/Inactivity in INT_SOURCE. */
+bool ADXL345_FIFO_Entries_Checked(uint8_t *entries);
+/* On failure, *read_count still contains the successfully popped samples. */
+bool ADXL345_FIFO_Read_Checked(int16_t xyz[][3], uint8_t limit, uint8_t *read_count);
+bool ADXL345_Int_Source_Checked(uint8_t *source);
+/* ACT_TAP_STATUS must be sampled before INT_SOURCE clears Activity. */
+bool ADXL345_Activity_Status_Checked(uint8_t *activity_status,
+                                     uint8_t *source);
+void ADXL345_Stream_Stop(void);
+uint8_t ADXL345_FIFO_Entries(void);
+uint8_t ADXL345_FIFO_Read(int16_t xyz[][3], uint8_t max_samples);
+uint8_t ADXL345_Read_Int_Source(void);
 
 #endif

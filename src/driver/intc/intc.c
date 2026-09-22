@@ -233,7 +233,6 @@ void intc_init(void)
 #if (GPIO_DRIVER)
     if(IntStat & INT_STATUS_AON_GPIO_bit)
     {
-        uart_printf("gpio_int\n");
         irq_status |= INT_STATUS_AON_GPIO_bit;
         gpio_isr();
     }
@@ -425,4 +424,3 @@ void Reserved_Exception(void)
     }
 }
 #endif
-

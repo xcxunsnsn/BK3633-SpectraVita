@@ -112,6 +112,8 @@ enum app_msg_id
 	APP_READ_UV,
 	
 	APP_READ_ACC,
+	APP_ACC_FIFO_POLL,
+	APP_ACC_FLASH_STEP,
 };
 
 

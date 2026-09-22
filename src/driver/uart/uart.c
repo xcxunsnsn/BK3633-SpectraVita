@@ -106,8 +106,12 @@ int uart0_printf(const char *fmt,...)
     int n;
     char send_buf[128];
     va_start(ap, fmt);
-    n=vsprintf(send_buf, fmt, ap);
+    n=vsnprintf(send_buf, sizeof(send_buf), fmt, ap);
     va_end(ap);
+    if (n < 0)
+        return 0;
+    if ((size_t)n >= sizeof(send_buf))
+        n = sizeof(send_buf) - 1;
     uart_send(send_buf, n);
     while(0==(addUART0_Reg0x2&(1<<posUART0_Reg0x2_TX_FIFO_EMPTY)));
     return n;
@@ -169,8 +173,12 @@ int uart_printf_dut(const char *fmt,...)
     int n;
     char send_buf[128];
     va_start(ap, fmt);
-    n=vsprintf(send_buf, fmt, ap);
+    n=vsnprintf(send_buf, sizeof(send_buf), fmt, ap);
     va_end(ap);
+    if (n < 0)
+        return 0;
+    if ((size_t)n >= sizeof(send_buf))
+        n = sizeof(send_buf) - 1;
     uart_send(send_buf, n);
     return n;
 #else
@@ -687,5 +695,4 @@ void uart1_dma_read(uint8_t *buffer,uint16_t buffer_len)
 
     dma_config_read(UART1_DMA_R_CHANNEL,UART1_REQ,UART_FIFO_WR_ADDR,(uint32_t)buffer,buffer_len,DMA_DW_8B);
 }
-
 

@@ -82,6 +82,8 @@ static I2C_MSG * i2c_get_last_msg(void);
 STATUS i2c_write(uint8_t devAddr, uint8_t addr, uint8_t*buf, uint8_t size)
 {
     I2C_MSG p_i2c_msg;
+    I2C_MSG *last_msg;
+    STATUS result;
 
     #if 0   //Abel modify to remove gcc compile warning
     p_i2c_msg.work_mode    = 0
@@ -117,16 +119,18 @@ STATUS i2c_write(uint8_t devAddr, uint8_t addr, uint8_t*buf, uint8_t size)
 
     while (is_i2c_busy() == YES);       // wait until i2c0 free
 
-    //PrintI2CurrentMsg(i2c_get_last_msg());
+    last_msg = i2c_get_last_msg();
+    result = (last_msg != NULL && last_msg->errno == 0) ? OK : ERROR;
 
     i2c_msg_reset();
 
-    return OK;
+    return result;
 }
 
 STATUS i2c_read(uint8_t devAddr, uint8_t addr, uint8_t*buf, uint8_t size)
 {
     I2C_MSG p_i2c_msg;
+    I2C_MSG *last_msg;
 
     #if 0 //Abel modify to remove gcc compile warning
     p_i2c_msg.work_mode    = 0
@@ -159,15 +163,17 @@ STATUS i2c_read(uint8_t devAddr, uint8_t addr, uint8_t*buf, uint8_t size)
 
     while (is_i2c_busy() == YES);       // wait until i2c0 free
 
-    if(i2c_get_last_msg() != NULL)
+    last_msg = i2c_get_last_msg();
+    if(last_msg != NULL && last_msg->errno == 0 &&
+       last_msg->current_data_cnt == last_msg->all_data_cnt)
     {
-        //PrintI2CurrentMsg(i2c_get_last_msg());
-        memcpy(buf, i2c_get_last_msg()->data, i2c_get_last_msg()->all_data_cnt);
+        memcpy(buf, last_msg->data, last_msg->all_data_cnt);
         i2c_msg_reset();
 
         return OK;
     }
 
+    i2c_msg_reset();
     return ERROR;
 }
 
@@ -537,6 +543,7 @@ void i2c_isr(void)
         if (i2c_msg->ack_check && !ack)  // nack
         {
             i2c_stat |= 0x0200;       // send stop
+            i2c_msg->errno = 0x0001;
             i2c_msg->trans_done = 1;
             if (remain_data_cnt ) // err ,need restart i2c
             {
@@ -670,6 +677,7 @@ void i2c_isr(void)
         if (sta && i2c_msg->ack_check && !ack) // when tx address, we need ACK
         {
             i2c_stat = i2c_stat | 0x0200;
+            i2c_msg->errno = 0x0001;
             i2c_msg->trans_done = 1;
             break;
         }
@@ -986,4 +994,3 @@ void test_fram_iic(void)
 
 
 #endif
-

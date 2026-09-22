@@ -235,7 +235,13 @@ void enter_normal_app_mode(void)
     while(1)
     {
         // schedule all pending events
+        app_ble_scheduler_heartbeat();
         rwip_schedule();
+        acc_stream_process();
+		rwip_schedule();
+		acc_stream_storage_process();
+		rwip_schedule();
+		app_protocol_background_process();
         //app_fee4_send_ntf(0,512,data_buf);
         oad_updating_user_section_pro();
 
@@ -435,5 +441,3 @@ const struct rwip_eif_api* rwip_eif_get(uint8_t idx)
     }
     return ret;
 }
-
-

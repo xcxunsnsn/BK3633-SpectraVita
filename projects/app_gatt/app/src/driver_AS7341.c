@@ -32,6 +32,13 @@ static UBYTE AS7341_Read_Byte(UBYTE Addr)
     return Buf[0];
 }
 
+static bool AS7341_Read_Byte_Checked(UBYTE Addr, UBYTE *Value)
+{
+	if (Value == 0) return false;
+	*Value = 0;
+	return i2c_read(AS7341_ADDRESS, Addr, Value, 1) == OK;
+}
+
 /******************************************************************************
 function:	Read one word of data to AS7341 via I2C
 parameter:
@@ -54,6 +61,11 @@ Info:
 static void AS7341_Write_Byte(UBYTE Addr, UBYTE Value)
 {
 	i2c_write(AS7341_ADDRESS, Addr, &Value, 1);
+}
+
+static bool AS7341_Write_Byte_Checked(UBYTE Addr, UBYTE Value)
+{
+	return i2c_write(AS7341_ADDRESS, Addr, &Value, 1) == OK;
 }
 
 bool AS7341_Get_ID(void)
@@ -345,70 +357,80 @@ UBYTE AS7341_ReadFlickerData()
 }
 
 /******************************************************************************
-function:  start flicker measure
-info：		
+function:  start flicker FIFO acquisition
+info:      Datasheet DS000504 v3-00 defines tINT_FD = FD_TIME * 2.78 us.
 ******************************************************************************/
-void AS7341_SetFlickerFIFO(UWORD fd_time, UBYTE fd_gain,UBYTE fd_thred)
+bool AS7341_StartFlickerFIFO(UWORD fd_time, UBYTE fd_gain)
 {
-	UBYTE data1,data2;
-	uint32_t calc_num = 0;
-	
-	AS7341_Enable(false);
-	while(calc_num++ < 3000) //delay 22000us        
-	{                
-		__nop();        
-	}
-	AS7341_Enable(true);
-	
-	data1 = fd_time & 0xff;
-	data2 = ((fd_time>>8) & 0x07) | (fd_gain<<3);
-	//FD Time	 integration time =  ((Fd_time +1)*2.78)
-	//FD Gain
-	AS7341_Write_Byte(AS7341_FD_TIME_1,data1);
-	AS7341_Write_Byte(AS7341_TIME_2,data2);
-	
-	//FD Threshold
-	UBYTE data=0;
-	
-//	data = AS7341_Read_Byte(AS7341_CFG_8);  
-//	data = data & (~((~fd_thred)<<6));
-//	
-//	AS7341_Write_Byte(AS7341_CFG_8,data);
-	
-	//FIFO_CLR
-	data = AS7341_Read_Byte(AS7341_CONTROL);
-	data = data | (1<<2);
-	AS7341_Write_Byte(AS7341_CONTROL,data);
-	
-	//FIFO_WRITE_FD
-	AS7341_Write_Byte(AS7341_CFG0,0xA1);
-	
-	//FDEN 
-	AS7341_EnableFlickerDetection(true);
+	UBYTE data;
+
+	if (fd_time == 0 || fd_time > 0x07FF || fd_gain > 10) return false;
+
+	/* FD_TIME must only change while FDEN is clear.  Cycle PON and observe
+	 * the datasheet's approximately 300 us initialization interval; use
+	 * 500 us here to leave deterministic margin before the next I2C access. */
+	if (!AS7341_Read_Byte_Checked(AS7341_ENABLE, &data)) return false;
+	data &= (UBYTE)~((1U << 6) | 1U);
+	if (!AS7341_Write_Byte_Checked(AS7341_ENABLE, data)) return false;
+	if (!AS7341_Write_Byte_Checked(AS7341_ENABLE, (UBYTE)(data | 1U))) return false;
+	Delay_us(500);
+
+	if (!AS7341_Write_Byte_Checked(AS7341_FD_TIME_1,
+								 (UBYTE)(fd_time & 0xFF))) return false;
+	if (!AS7341_Write_Byte_Checked(AS7341_TIME_2,
+								 (UBYTE)(((fd_time >> 8) & 0x07) |
+										 (fd_gain << 3)))) return false;
+
+	/* CONTROL.FIFO_CLR is bit 1 (bit 2 is SP_MAN_AZ). */
+	if (!AS7341_Read_Byte_Checked(AS7341_CONTROL, &data)) return false;
+	if (!AS7341_Write_Byte_Checked(AS7341_CONTROL,
+								 (UBYTE)(data | (1U << 1)))) return false;
+
+	/* Preserve the reserved reset value 0x21 and enable flicker FIFO writes. */
+	if (!AS7341_Write_Byte_Checked(AS7341_CFG0, 0xA1)) return false;
+	if (!AS7341_Read_Byte_Checked(AS7341_ENABLE, &data)) return false;
+	return AS7341_Write_Byte_Checked(AS7341_ENABLE,
+								  (UBYTE)(data | (1U << 6)));
+}
+
+bool AS7341_GetFlickerFIFOStatus(UBYTE *level, UBYTE *status6)
+{
+	if (level == 0 || status6 == 0) return false;
+	/* FIFO_OV clears automatically after FIFO data is read, so sample it first. */
+	if (!AS7341_Read_Byte_Checked(AS7341_STATUS_6, status6)) return false;
+	return AS7341_Read_Byte_Checked(AS7341_FIFO_LVL, level);
 }
 
 /******************************************************************************
-function:  read flicker fifo
-info：		
+function:  drain a bounded number of flicker FIFO entries without stopping FD
+info:      Reading the 0xFE/0xFF pair advances the FIFO by one two-byte entry.
 ******************************************************************************/
-void AS7341_ReadFlickerFIFO(UWORD *buf, UBYTE *len)
+bool AS7341_ReadFlickerFIFO(UWORD *buf, UBYTE max_samples, UBYTE *len)
 {
-	UBYTE fifo_lvl,data[2],i;
-	UWORD u16data;
-	
-	AS7341_EnableFlickerDetection(false);
-	AS7341_Write_Byte(AS7341_CFG0,0x21);
-	fifo_lvl = AS7341_Read_Byte(AS7341_FIFO_LVL);
-	//UART_PRINTF("FIFO_LVL = %d\n Data = ",fifo_lvl);
-	fifo_lvl = fifo_lvl>128?128:fifo_lvl;
-	*len = fifo_lvl;
-	for(i=0;i<fifo_lvl;i++)
-	{
-		data[0] = AS7341_Read_Byte(AS7341_FDATA_L); 
-		data[1] = AS7341_Read_Byte(AS7341_FDATA_H);
-		u16data = data[1]<<8 | data[0];
-		buf[i] = u16data;
-	}	
+	UBYTE data[2];
+	UBYTE i;
+
+	if (buf == 0 || len == 0) return false;
+	*len = 0;
+	for (i = 0; i < max_samples; i++) {
+		if (i2c_read(AS7341_ADDRESS, AS7341_FDATA_L, data, 2) != OK)
+			return false;
+		buf[i] = (UWORD)(((UWORD)data[1] << 8) | data[0]);
+		*len = (UBYTE)(i + 1);
+	}
+	return true;
+}
+
+bool AS7341_StopFlickerFIFO(void)
+{
+	UBYTE data;
+	bool ok = true;
+
+	if (!AS7341_Read_Byte_Checked(AS7341_ENABLE, &data)) return false;
+	if (!AS7341_Write_Byte_Checked(AS7341_ENABLE,
+								 (UBYTE)(data & ~(1U << 6)))) ok = false;
+	if (!AS7341_Write_Byte_Checked(AS7341_CFG0, 0x21)) ok = false;
+	return ok;
 }
 
 /******************************************************************************

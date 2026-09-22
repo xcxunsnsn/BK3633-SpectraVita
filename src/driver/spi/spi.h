@@ -116,6 +116,8 @@ void spi_waitbusying(void);
 void spi_isr(void);
 void spi_write(uint8_t *wbuf, uint32_t w_size);
 void spi_read( uint8_t *rbuf, uint32_t r_size);
+/* Checked polling read used by the external Flash path.  */
+bool spi_read_checked(uint8_t *rbuf, uint32_t r_size);
 
 void spi_receiv(uint16_t r_size);
 uint8_t spi_send_state_get(void);

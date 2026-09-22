@@ -677,7 +677,7 @@ static int gapc_get_dev_info_req_ind_handler(ke_msg_id_t const msgid,
             // Slave preferred Connection latency
             cfm->info.slv_pref_params.slave_latency  = BLE_UAPDATA_LATENCY;
             // Slave preferred Link supervision timeout
-            cfm->info.slv_pref_params.conn_timeout    = BLE_UAPDATA_TIMEOUT;  // 2s (500*10ms)
+            cfm->info.slv_pref_params.conn_timeout    = BLE_UAPDATA_TIMEOUT;  // 10s
 
             // Send message
             ke_msg_send(cfm);
@@ -1037,7 +1037,7 @@ static int gapc_disconnect_ind_handler(ke_msg_id_t const msgid,
     #endif //(!BLE_APP_HID)
 
     app_env.connected = 0;
-	app_ble_disconnect_handle();
+	app_ble_disconnect_handle(param->reason);
 
     return (KE_MSG_CONSUMED);
 }
@@ -1408,6 +1408,24 @@ static int app_read_uv_handler(ke_msg_id_t const msgid,
 	return KE_MSG_CONSUMED;
 }
 
+static int app_acc_fifo_poll_handler(ke_msg_id_t const msgid,
+                                          void *param,
+                                          ke_task_id_t const dest_id,
+                                          ke_task_id_t const src_id)
+{
+    acc_stream_poll_task();
+    return KE_MSG_CONSUMED;
+}
+
+static int app_acc_flash_step_handler(ke_msg_id_t const msgid,
+                                          void *param,
+                                          ke_task_id_t const dest_id,
+                                          ke_task_id_t const src_id)
+{
+    acc_stream_storage_tick();
+    return KE_MSG_CONSUMED;
+}
+
 static int app_read_acc_handler(ke_msg_id_t const msgid,
                                           void *param,
                                           ke_task_id_t const dest_id,
@@ -1518,6 +1536,8 @@ KE_MSG_HANDLER_TAB(appm)
 	{APP_READ_DIST,					(ke_msg_func_t)app_read_dist_handler},
 	{APP_READ_UV,					(ke_msg_func_t)app_read_uv_handler},
 	{APP_READ_ACC,					(ke_msg_func_t)app_read_acc_handler},
+	{APP_ACC_FIFO_POLL, (ke_msg_func_t)app_acc_fifo_poll_handler},
+	{APP_ACC_FLASH_STEP, (ke_msg_func_t)app_acc_flash_step_handler},
 };
 
 /* Defines the place holder for the states of all the task instances. */

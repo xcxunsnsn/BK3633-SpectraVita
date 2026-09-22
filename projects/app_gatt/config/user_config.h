@@ -101,13 +101,13 @@
 
 
 //��С���Ӽ��
-#define BLE_UAPDATA_MIN_INTVALUE        60
+#define BLE_UAPDATA_MIN_INTVALUE        24 /* 30 ms, unit 1.25 ms */
 //������Ӽ�� 
-#define BLE_UAPDATA_MAX_INTVALUE        80
+#define BLE_UAPDATA_MAX_INTVALUE        40 /* 50 ms, unit 1.25 ms */
 //����Latency
-#define BLE_UAPDATA_LATENCY                4
+#define BLE_UAPDATA_LATENCY                0
 //���ӳ�ʱ
-#define BLE_UAPDATA_TIMEOUT                600
+#define BLE_UAPDATA_TIMEOUT               1000 /* 10 s, unit 10 ms */
 
 // If you want to enable MULTI BOND, make sure CFG_BLE_SMP, BLE_APP_SEC are enabled
 #define MULTI_BOND              0
@@ -133,8 +133,9 @@
 #define W25QXX_SDO_PIN   0x06
 
 #define ADXL_CS_PIN   0x12
-#define ADXL_IN1_PIN   0x37
-#define ADXL_IN2_PIN   0x20
+/* XZ: ADXL345 INT1 -> P20; INT2 -> P37. */
+#define ADXL_IN1_PIN   0x20
+#define ADXL_IN2_PIN   0x37
 #define WH4530_INT_PIN   0x21
 #define UV_READY_PIN   0x10
 #define UV_SYN_PIN   0x34

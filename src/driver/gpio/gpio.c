@@ -123,7 +123,9 @@ void gpio_set_int_mode(uint8_t gpio,uint8_t mode)
         REG_GPIO_WUATOD_TYPE1 |= mode<<(2*((port*8+pin)-16));
     }
     REG_GPIO_WUATOD_ENABLE |= 1<<(port*8+pin);
-    REG_GPIO_WUATOD_STATUS |= 1<<(port*8+pin);
+    /* STATUS is write-one-to-clear. Avoid read/modify/write because it would
+     * also clear unrelated GPIO interrupt flags that happened to be set. */
+    REG_GPIO_WUATOD_STATUS = 1UL<<(port*8+pin);
     addPMU_Reg0x3 |= 1<<(port*8+pin);
 }
 
@@ -221,7 +223,6 @@ void DEBUG_MSG(uint8_t x)
     addAON_GPIO_Reg0xe=0x02;
 #endif
 }
-
 
 
 
