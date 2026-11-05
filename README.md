@@ -1,6 +1,39 @@
-# BK3633 SpectraVita 多传感器低功耗蓝牙固件
+# SpectraVita 多传感器采集系统：BK3633固件与Windows/Android上位机
 
-本仓库是基于 BK3633 SDK 开发的多传感器低功耗蓝牙固件。设备通过 I²C 周期采集多光谱、闪烁 FIFO、紫外、接近和加速度数据，保存到板载 W25Q64，并通过自定义 BLE GATT 服务上传到手机 APP。
+本仓库包含基于 BK3633 SDK 的多传感器采集固件，以及 Windows / Android 共用的 Flutter 上位机源码。设备通过 I²C 周期采集多光谱、多光谱 FIFO、紫外、接近和加速度数据，保存到板载 W25Q64，再通过自定义 BLE GATT 服务上传至上位机。
+
+## 获取源码与工程入口
+
+```powershell
+git clone https://github.com/xcxunsnsn/BK3633-SpectraVita.git
+cd BK3633-SpectraVita
+```
+
+| 目录 | 内容 | 开发入口 |
+| --- | --- | --- |
+| `projects/app_gatt/` | BK3633应用、五类传感器、Flash存储及V4协议 | `prj3633.uvproj`，Keil `Target1` |
+| `src/` | BK3633 SDK、底层驱动及库 | 由Keil工程引用 |
+| `tests/acc_fifo_host/` | 固件主机回归测试 | `run_tests.cmd` |
+| `SpectraVita_App/` | Windows与Android共用的上位机源码 | `pubspec.yaml`，Flutter工程根目录 |
+
+Windows和Android共用`SpectraVita_App/lib/`中的界面、协议和BLE业务代码，平台配置分别位于`windows/`和`android/`。打开整个`SpectraVita_App`目录，按[上位机开发与构建说明](SpectraVita_App/README.md)配置环境。
+
+```powershell
+cd SpectraVita_App
+flutter pub get
+flutter analyze
+flutter test
+flutter build windows --release
+flutter build apk --debug
+```
+
+上位机原验证环境为Flutter 3.47.2 / Dart 3.13.2。Windows需要Visual Studio C++桌面开发组件，Android需要Android Studio/SDK；两端输出目录与签名注意事项见上位机README。2026-11-05源码交付副本通过静态分析和全部46项测试。
+
+下面介绍设备固件。固件生成镜像、上位机构建缓存和安装包不作为源码提交；固件编译必需的boot/stack镜像、转换工具，以及Android Gradle Wrapper、字体与许可证保留在仓库内。
+
+历史汇报材料可能记录较早实现；当前行为以源码、本文和[协议说明](projects/app_gatt/PROTOCOL_V4_NOTES.md)为准。
+
+固件主机测试可执行`tests/acc_fifo_host/run_tests.cmd`。该脚本中的Visual Studio开发环境路径，以及根目录两个`Keil_Prj_check_*.bat`中的Keil路径，需要按本机安装位置调整；这不影响直接在Keil中打开主工程构建。
 
 当前阶段已经完成并通过基础硬件测试：
 
@@ -37,7 +70,7 @@ projects/app_gatt/prj3633.uvproj
 
 当前使用环境：
 
-- Keil µVision 5：`D:\keil\UV4\UV4.exe`
+- Keil µVision 5（按本机安装路径打开）；
 - ARM Compiler 5.06 update 6；
 - MDK v5.25 Legacy Device Support：ARM7、ARM9 与 Cortex-R；
 - Beken Writer V2.00；

@@ -26,3 +26,22 @@ projects/app_gatt/app/*.bin
 *.user
 .DS_Store
 Thumbs.db
+
+# Local development notes and editor settings
+/AGENTS.md
+/HANDOFF.md
+/HANDOFF_README.md
+/.codex_tmp/
+/.idea/
+/.vscode/
+
+# Host application caches, outputs and machine-specific settings
+/SpectraVita_App/build/
+/SpectraVita_App/.dart_tool/
+/SpectraVita_App/.flutter-plugins-dependencies
+/SpectraVita_App/.idea/
+/SpectraVita_App/.vscode/
+/SpectraVita_App/android/local.properties
+/SpectraVita_App/android/.gradle/
+/SpectraVita_App/android/.kotlin/
+/SpectraVita_App/windows/flutter/ephemeral/
